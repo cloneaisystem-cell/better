@@ -1,0 +1,1060 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="robots" content="noindex, nofollow">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Kiln Keeper</title>
+<style>
+  html, body { margin: 0; height: 100%; background: #0c0710; overflow: hidden; }
+  body { display: flex; align-items: center; justify-content: center; }
+  canvas { display: block; touch-action: none; user-select: none; }
+  .sr-only { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+</style>
+</head>
+<body>
+<canvas id="game" role="img" aria-label="Kiln Keeper game"></canvas>
+<div id="live" class="sr-only" aria-live="polite"></div>
+<script>
+(() => {
+  'use strict';
+
+  // Kiln Keeper: catch the gold embers (big ones are worth more), dodge the ash, and quench
+  // to clear every cinder on screen (each cleared cinder is worth a point). Catch streaks raise
+  // the score; every 10 points is a new heat, and every 40 catches wins back a lost life.
+  // Keys: LEFT / RIGHT or A / D move the bucket, SPACE or UP quenches once the gauge is full,
+  // P or ESC pauses (also automatic when the tab loses focus) and starts a run from the title or
+  // game-over screen; M mutes (remembered between visits). Every catch also charges the quench
+  // gauge a little, and the cup narrows slightly with each heat.
+  // Touch or mouse: hold the left or right half of the screen to move, tap the top band to quench,
+  // and on touch tap the pause icon at the top right (touch has no P or M key; the speaker beside it mutes).
+  // Ash that slips past the cup, close but not touching, is a graze: a small gauge bonus, once per cinder.
+  // Reduced-motion users get still title and pulse effects; a polite live region announces heat-ups,
+  // streaks of 10, a full quench gauge and the game-over score for screen readers.
+  // A quench that clears three or more cinders refunds part of the gauge. Losing the last life dims the
+  // scene and slows for a beat before game over. Pressing quench early shakes the gauge instead.
+  // Two seconds idle on the title or game-over screen starts attract mode: an AI plays
+  // the game until a key or tap is pressed.
+
+  const W = 360, H = 640;
+  const IDLE_MS = 2000;
+  const BUCKET_SPEED = 380;     // px per second
+  const QUENCH_TIME = 6;        // seconds to recharge the quench gauge
+  const OVER_LOCK_MS = 800;     // game-over screen ignores keys for this long
+  const TAU = Math.PI * 2;
+  const KEYS = { ArrowLeft: 'left', ArrowRight: 'right', KeyA: 'left', KeyD: 'right', Space: 'space', ArrowUp: 'space', KeyP: 'pause', Escape: 'pause', KeyM: 'mute' };
+  const BEST_KEY = 'kiln-keeper-best';
+  const MUTE_KEY = 'kiln-keeper-muted';
+  const IS_TOUCH = ('ontouchstart' in window) || (typeof navigator !== 'undefined' && navigator.maxTouchPoints > 0);
+  const REDUCED_MOTION = typeof window.matchMedia === 'function' && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  const GO_TEXT = IS_TOUCH ? 'Tap' : 'Press any key';   // the prompt word for this device
+  const CHIMNEYS = [{ x: 30, h: 110 }, { x: 74, h: 80 }, { x: 286, h: 92 }, { x: 332, h: 128 }];   // kiln stacks on the horizon
+
+  const canvas = document.getElementById('game');
+  const ctx = canvas.getContext('2d');
+
+  const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
+  const rand = (a, b) => a + Math.random() * (b - a);
+
+  function resize() {
+    const dpr = window.devicePixelRatio || 1;
+    const s = Math.min(window.innerWidth / W, window.innerHeight / H);
+    const cssW = Math.floor(W * s), cssH = Math.floor(H * s);
+    canvas.style.width = cssW + 'px';
+    canvas.style.height = cssH + 'px';
+    canvas.width = Math.max(1, Math.floor(cssW * dpr));
+    canvas.height = Math.max(1, Math.floor(cssH * dpr));
+    ctx.setTransform(canvas.width / W, 0, 0, canvas.height / H, 0, 0);
+  }
+  window.addEventListener('resize', resize);
+  resize();
+
+  // ---- storage (best score; ignored if storage is blocked) ----------------
+  function loadBest() {
+    try { return parseInt(localStorage.getItem(BEST_KEY), 10) || 0; } catch (e) { return 0; }
+  }
+  function saveBest(v) {
+    try { localStorage.setItem(BEST_KEY, String(v)); } catch (e) { /* ignore */ }
+  }
+  function loadMuted() {
+    try { return localStorage.getItem(MUTE_KEY) === '1'; } catch (e) { return false; }
+  }
+  function saveMuted(v) {
+    try { localStorage.setItem(MUTE_KEY, v ? '1' : '0'); } catch (e) { /* ignore */ }
+  }
+
+  // ---- audio: short WebAudio beeps, no files ------------------------------
+  let actx = null;
+  function unlockAudio() {
+    try {
+      if (!actx) actx = new (window.AudioContext || window.webkitAudioContext)();
+      if (actx.state === 'suspended') actx.resume();
+    } catch (e) { actx = null; }
+  }
+  function tone(freq, dur, type, vol, slideTo) {
+    if (!actx || actx.state !== 'running') return;
+    const t0 = actx.currentTime;
+    const o = actx.createOscillator();
+    const g = actx.createGain();
+    o.type = type;
+    o.frequency.setValueAtTime(freq, t0);
+    if (slideTo) o.frequency.exponentialRampToValueAtTime(slideTo, t0 + dur);
+    g.gain.setValueAtTime(vol, t0);
+    g.gain.exponentialRampToValueAtTime(0.0001, t0 + dur);
+    o.connect(g);
+    g.connect(actx.destination);
+    o.start(t0);
+    o.stop(t0 + dur + 0.05);
+  }
+  function sfx(name, n, big) {
+    if (mode === 'attract' || muted) return;   // the demo plays silently
+    if (name === 'catch') {
+      const f = 880 * Math.pow(2, Math.min(n || 0, 12) / 12);   // one semitone per streak step, up to an octave
+      tone(f, 0.12, 'triangle', 0.07, f * 1.5);
+      if (big) tone(f * 0.5, 0.22, 'sine', 0.05, f * 0.45);   // a big ember adds a low, layered tone
+    }
+    else if (name === 'hit') tone(170, 0.3, 'sawtooth', 0.08, 60);
+    else if (name === 'quench') tone(420, 0.35, 'sine', 0.09, 1400);
+    else if (name === 'over') tone(300, 0.7, 'square', 0.05, 90);
+    else if (name === 'level') tone(660, 0.25, 'triangle', 0.08, 990);
+    else if (name === 'miss') tone(260, 0.18, 'sine', 0.035, 170);
+    else if (name === 'graze') tone(1240, 0.08, 'sine', 0.03, 1560);
+    else if (name === 'ready') tone(990, 0.16, 'triangle', 0.05, 1480);
+  }
+
+  // light vibration on touch phones while playing (never during the demo)
+  function buzz(ms) {
+    if (IS_TOUCH && mode === 'play' && typeof navigator.vibrate === 'function') navigator.vibrate(ms);
+  }
+
+  // ---- state --------------------------------------------------------------
+  let mode = 'title';           // 'title' | 'play' | 'over' | 'attract'
+  let world = newWorld();
+  let best = loadBest();
+  let lastScore = 0;
+  let demoScore = 0;   // the AI demo's last run, shown on the attract screen
+  let lastHeat = 1;
+  let lastStreak = 0;
+  let lastCatches = 0, lastTime = 0, lastGrazes = 0;
+  let isNewBest = false;
+  let overAt = 0;
+  let pendingQuench = false;
+  let paused = false;
+  let muted = loadMuted();
+  let lastInput = performance.now();
+  const held = new Set();
+  const touchDirs = new Map();   // pointerId -> -1 (left half) or 1 (right half)
+  const motes = Array.from({ length: 26 }, () => ({
+    x: Math.random() * W, y: Math.random() * H,
+    r: rand(0.8, 2), sp: rand(10, 32), ph: rand(0, TAU)
+  }));
+
+  function newWorld() {
+    return {
+      bx: W / 2, vx: 0, bw: 84, bh: 30, by: H - 60, wind: 0,
+      sparks: [], parts: [],
+      score: 0, lives: 3, streak: 0, bestStreak: 0, catches: 0, grazes: 0,
+      charge: 0, spawnT: 0.8, squash: 0, bump: 0, heartT: 0,
+      time: 0, shake: 0, flash: 0, endT: 0,
+      pops: [],
+      rings: [],
+      lvl: 0, banner: null, beat: false, dying: 0, nudge: 0
+    };
+  }
+
+  function burst(w, x, y, color, n) {
+    for (let i = 0; i < n; i++) {
+      const a = Math.random() * TAU, sp = rand(60, 220);
+      const life = rand(0.4, 0.8);
+      w.parts.push({ x, y, vx: Math.cos(a) * sp, vy: Math.sin(a) * sp - 80, life, max: life, color });
+    }
+  }
+
+  function pop(w, x, y, str, color) {
+    // keep the text whole on screen: a longer popup stays a little further from the edges
+    const half = Math.min(72, str.length * 5.5 + 4);
+    w.pops.push({ x: clamp(x, half, W - half), y, str, color, life: 0.9, max: 0.9 });
+  }
+
+  // ---- simulation -----------------------------------------------------------
+  function step(w, dt, inp) {
+    w.time += dt;
+    w.shake = Math.max(0, w.shake - dt);
+    w.flash = Math.max(0, w.flash - dt);
+    w.squash = Math.max(0, w.squash - dt * 5);
+    w.bump = Math.max(0, w.bump - dt * 4);
+    w.heartT = Math.max(0, w.heartT - dt);
+    w.nudge = Math.max(0, w.nudge - dt);
+    const wasCharged = w.charge >= 1;
+    // slow gusts push falling cinders sideways; they get stronger as the heat rises
+    w.wind = Math.sin(w.time * 0.35) * Math.min(30, 6 + w.lvl * 3);
+
+    // bucket eases toward its target speed instead of snapping
+    // the cup narrows a little with each heat, down to 72 px
+    const bwTarget = Math.max(72, 84 - w.lvl * 2);
+    w.bw += (bwTarget - w.bw) * Math.min(1, dt * 2);
+    const lo = w.bw / 2 + 4, hi = W - w.bw / 2 - 4;
+    w.vx += (inp.dir * BUCKET_SPEED - w.vx) * Math.min(1, dt * 14);
+    w.bx = clamp(w.bx + w.vx * dt, lo, hi);
+    if (w.bx <= lo || w.bx >= hi) w.vx = 0;
+
+    // quench: clears every ash cinder on screen
+    w.charge = Math.min(1, w.charge + dt / QUENCH_TIME);
+    if (inp.quench && w.charge < 1) w.nudge = 0.35;   // pressed too early: the gauge shakes instead
+    if (inp.quench && w.charge >= 1) {
+      w.charge = 0;
+      w.flash = 0.3;
+      w.shake = Math.max(w.shake, REDUCED_MOTION ? 0 : 0.2);
+      sfx('quench');
+      buzz(18);
+      let cleared = 0;
+      w.sparks = w.sparks.filter(s => {
+        if (s.kind !== 'ash') return true;
+        burst(w, s.x, s.y, '#cfc8dc', 10);
+        cleared++;
+        return false;
+      });
+      w.rings.push({ life: 0.5, max: 0.5 });
+      w.score += cleared;   // each cinder cleared is worth one point
+      if (cleared > 2) w.charge = Math.min(1, w.charge + 0.02 * (cleared - 2));   // a good sweep refunds a little gauge
+      if (cleared > 0) pop(w, W / 2, H * 0.5, 'cleared ' + cleared + ', +' + cleared, '#fff3dc');
+      else pop(w, W / 2, H * 0.5, 'no ash on screen', '#9d95ad');   // a wasted quench says so, in grey
+    }
+
+    // spawn: gets faster and more ash-heavy as the score climbs
+    w.spawnT -= dt;
+    if (w.spawnT <= 0) {
+      const level = Math.min(w.score, 60);
+      const r = 9;
+      w.spawnT = Math.max(0.32, 0.9 - level * 0.01) * rand(0.8, 1.2);
+      const roll = Math.random();
+      const warm = w.time < 4;   // first 4 s of a run: embers only, so new players learn the bucket
+      const kind = !warm && roll < Math.min(0.42, 0.18 + level * 0.005) ? 'ash' : (roll > 0.94 ? 'big' : 'gold');
+      const sr = kind === 'big' ? 14 : r;
+      // from heat 2 on, some gold embers arrive as a side-by-side pair
+      const x0 = rand(sr + 8, W - sr - 8);
+      const pair = kind === 'gold' && w.lvl >= 2 && Math.random() < 0.15;
+      const xs = pair ? [x0, clamp(x0 + (Math.random() < 0.5 ? -26 : 26), sr + 8, W - sr - 8)] : [x0];
+      for (const x of xs) {
+        w.sparks.push({
+          kind,
+          x, y: -sr, r: sr,
+          vy: 120 + Math.min(150, level * 4) + rand(0, 30) + (kind === 'big' ? 20 : 0),
+          wob: rand(0, TAU),
+          spin: rand(-2.5, 2.5),
+          trail: []
+        });
+      }
+    }
+
+    // falling sparks and collisions with the bucket (circle vs rectangle)
+    const left = w.bx - w.bw / 2, right = w.bx + w.bw / 2;
+    const top = w.by, bottom = w.by + w.bh;
+    const keep = [];
+    for (const s of w.sparks) {
+      s.y += s.vy * dt;
+      s.x = clamp(s.x + (Math.sin(w.time * 2 + s.wob) * 18 + w.wind * (s.kind === 'ash' ? 1.2 : 0.5)) * dt, s.r, W - s.r);
+      if (s.kind !== 'ash') {
+        s.trail.push([s.x, s.y]);
+        if (s.trail.length > 6) s.trail.shift();
+      }
+      const dx = s.x - clamp(s.x, left, right);
+      const dy = s.y - clamp(s.y, top, bottom);
+      // graze: an ash cinder that slips past the side of the cup, close but not touching, charges the gauge once
+      const d2 = dx * dx + dy * dy;
+      if (s.kind === 'ash' && !s.near && s.y > top && d2 > s.r * s.r && d2 < (s.r + 10) * (s.r + 10)) {
+        s.near = true;
+        w.charge = Math.min(1, w.charge + 0.02);
+        w.grazes++;
+        pop(w, s.x, s.y, 'graze', '#b9b0d6');
+        sfx('graze');
+      }
+      if (d2 <= s.r * s.r) {
+        if (s.kind !== 'ash') {
+          w.streak++;
+          if (w.streak > w.bestStreak) w.bestStreak = w.streak;
+          w.catches++;
+          w.charge = Math.min(1, w.charge + (s.kind === 'big' ? 0.04 : 0.01));   // catches feed the quench gauge
+          w.squash = 1;   // the cup gives a little under each catch
+          w.bump = 1;     // and the score number pops
+          if (w.catches % 40 === 0 && w.lives > 0 && w.lives < 3) {   // every 40 catches wins back one lost life
+            w.lives++;
+            pop(w, w.bx, w.by - 36, '+1 life', '#ffb08a');
+            sfx('level');
+          }
+          const base = s.kind === 'big' ? 3 : 1;
+          const pts = base + Math.floor(w.streak / 5);   // every 5 in a row adds a bonus point
+          w.score += pts;
+          burst(w, s.x, s.y, s.kind === 'big' ? '#fff0a8' : '#ffd166', s.kind === 'big' ? 16 : 8);
+          pop(w, s.x, s.y, '+' + pts, '#ffd166');
+          if (w.streak % 5 === 0) pop(w, W / 2, H * 0.28, 'STREAK ' + w.streak + '!', '#ffb347');
+          if (w.streak % 10 === 0) w.rings.push({ life: 0.7, max: 0.7, col: 'rgba(255,209,102,0.9)', reach: 150 });   // a gold ring per 10-catch streak
+          sfx('catch', w.streak, s.kind === 'big');
+          buzz(8);
+        } else {
+          w.lives--;
+          w.heartT = 0.6;
+          w.streak = 0;
+          w.shake = REDUCED_MOTION ? 0 : 0.35;
+          burst(w, s.x, s.y, '#9d95ad', 12);
+          pop(w, s.x, s.y, '-1 life', '#ff8a5b');
+          sfx('hit');
+          buzz(40);
+        }
+      } else if (s.y - s.r <= H) {
+        keep.push(s);
+      } else {
+        // whatever reaches the floor puffs a little; a missed ember also breaks the streak
+        burst(w, clamp(s.x, 8, W - 8), H - 4, s.kind === 'ash' ? '#6e6880' : '#ff8a5b', 6);
+        if (s.kind !== 'ash') {
+          if (w.streak >= 3) pop(w, clamp(s.x, 40, W - 40), H - 30, 'streak lost', '#ff8a5b');
+          w.streak = 0;
+          sfx('miss');
+        }
+      }
+    }
+    w.sparks = keep;
+    w.lives = Math.max(0, w.lives);
+
+    // every 10 points raises the heat: banner and chime
+    const lvl = Math.floor(w.score / 10);
+    if (lvl > w.lvl) {
+      w.lvl = lvl;
+      w.spawnT = Math.max(w.spawnT, 0.6);   // a short breather: no new cinders fall while the banner shows
+      if (!REDUCED_MOTION) w.flash = Math.max(w.flash, 0.2);   // and a brief warm flash, skipped for reduced motion
+      w.banner = { life: 1.6, max: 1.6, text: 'HEAT ' + (lvl + 1) };
+      w.rings.push({ life: 0.8, max: 0.8, col: 'rgba(255,170,80,0.9)', reach: 180 });   // an ember ring rolls out of the cup
+      sfx('level');
+    }
+    if (w.banner) {
+      w.banner.life -= dt;
+      if (w.banner.life <= 0) w.banner = null;
+    }
+
+    for (const p of w.parts) {
+      p.x += p.vx * dt;
+      p.y += p.vy * dt;
+      p.vy += 420 * dt;
+      p.life -= dt;
+    }
+    w.parts = w.parts.filter(p => p.life > 0);
+    for (const p of w.pops) { p.y -= 40 * dt; p.life -= dt; }
+    w.pops = w.pops.filter(p => p.life > 0);
+    for (const rg of w.rings) rg.life -= dt;
+    w.rings = w.rings.filter(rg => rg.life > 0);
+    if (!wasCharged && w.charge >= 1) sfx('ready');   // the gauge chimes once when it fills, however it fills
+  }
+
+  // Attract-mode AI: dodge cinders that are about to reach the bucket,
+  // quench when it helps, otherwise chase the lowest gold ember.
+  function aiInput(w) {
+    const cx = w.bx, reach = w.bw / 2 + 16;
+    let threat = null, threatT = Infinity, ashHigh = 0;
+    for (const s of w.sparks) {
+      if (s.kind !== 'ash') continue;
+      if (s.y > H * 0.4) ashHigh++;
+      const t = (w.by - s.y) / s.vy;      // seconds until it reaches the bucket line
+      if (t > 0 && t < 1.1 && Math.abs(s.x - cx) < reach + s.r && t < threatT) {
+        threat = s;
+        threatT = t;
+      }
+    }
+    const out = { dir: 0, quench: w.charge >= 1 && (threat !== null || ashHigh >= 3) };
+    if (threat) {
+      out.dir = threat.x < cx ? 1 : -1;
+      return out;
+    }
+    let target = null;
+    for (const s of w.sparks) {
+      if (s.kind !== 'ash' && (!target || s.y > target.y)) target = s;
+    }
+    const goalX = target ? target.x : W / 2;
+    if (Math.abs(goalX - cx) > 3) out.dir = goalX > cx ? 1 : -1;
+    return out;
+  }
+
+  function humanInput() {
+    let dir = (held.has('ArrowRight') || held.has('KeyD') ? 1 : 0) - (held.has('ArrowLeft') || held.has('KeyA') ? 1 : 0);
+    for (const d of touchDirs.values()) dir += d;
+    dir = clamp(dir, -1, 1);
+    const quench = pendingQuench;
+    pendingQuench = false;
+    return { dir, quench };
+  }
+
+  // ---- mode changes -----------------------------------------------------------
+  function startRun() {
+    mode = 'play';
+    paused = false;
+    world = newWorld();
+    pendingQuench = false;
+  }
+
+  function enterAttract() {
+    mode = 'attract';
+    world = newWorld();
+    pendingQuench = false;
+  }
+
+  function endRun(now) {
+    lastScore = world.score;
+    lastHeat = world.lvl + 1;
+    lastStreak = world.bestStreak;
+    lastCatches = world.catches;
+    lastGrazes = world.grazes;
+    lastTime = world.time;
+    world.banner = null;   // effects freeze on the game-over screen otherwise
+    world.pops = [];
+    world.rings = [];
+    isNewBest = lastScore > 0 && lastScore > best;
+    if (isNewBest) { best = lastScore; saveBest(best); }
+    mode = 'over';
+    overAt = now;
+    sfx('over');
+  }
+
+  function update(dt, now) {
+    // title or game-over screen idle for 2 s -> attract mode takes over.
+    // An active run is never interrupted; it only ends when the lives run out.
+    if ((mode === 'title' || mode === 'over') && held.size === 0 && now - lastInput > IDLE_MS) enterAttract();
+
+    if (paused) return;   // the run is frozen until P or ESC
+    if (mode === 'play') {
+      if (world.lives <= 0) {
+        // the last life is gone: time crawls for a beat before the game-over screen
+        world.dying += dt;
+        step(world, dt * 0.3, { dir: 0, quench: false });
+        if (world.dying > 1) endRun(now);
+        return;
+      }
+      step(world, dt, humanInput());
+      if (!world.beat && world.score > best) {
+        world.beat = true;
+        pop(world, W / 2, H * 0.35, 'NEW BEST!', '#ffd166');
+      }
+    } else if (mode === 'attract') {
+      if (world.lives <= 0) {
+        if (world.endT === 0) demoScore = world.score;   // remember the demo's score once
+        world.endT += dt;
+        if (world.endT > 1.2) world = newWorld();   // start another demo run
+      }
+      step(world, dt, aiInput(world));
+    }
+  }
+
+  // ---- rendering ----------------------------------------------------------------
+  function shade(a) {
+    ctx.fillStyle = 'rgba(10,5,14,' + a + ')';
+    ctx.fillRect(0, 0, W, H);
+  }
+
+  function text(str, y, size, color, weight, family) {
+    ctx.fillStyle = color;
+    ctx.font = (weight || 'normal') + ' ' + size + 'px ' + (family || 'system-ui, sans-serif');
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText(str, W / 2, y);
+  }
+
+  function drawBackground(now, heat) {
+    const hot = Math.min(1, heat / 6);   // 0 at heat 1, fully red-orange by heat 7
+    const bg = ctx.createLinearGradient(0, 0, 0, H);
+    bg.addColorStop(0, '#120a1d');
+    bg.addColorStop(0.65, 'rgb(' + Math.round(43 + 28 * hot) + ',21,' + Math.round(48 - 18 * hot) + ')');
+    bg.addColorStop(1, 'rgb(' + Math.round(77 + 70 * hot) + ',' + Math.round(33 + 14 * hot) + ',' + Math.round(25 - 5 * hot) + ')');
+    ctx.fillStyle = bg;
+    ctx.fillRect(0, 0, W, H);
+
+    const glow = ctx.createRadialGradient(W / 2, H + 40, 10, W / 2, H + 40, 320);
+    glow.addColorStop(0, 'rgba(255,150,70,' + (0.45 + 0.08 * Math.sin(now / 300) + 0.12 * hot).toFixed(3) + ')');
+    glow.addColorStop(1, 'rgba(255,150,70,0)');
+    ctx.fillStyle = glow;
+    ctx.fillRect(0, 0, W, H);
+
+    ctx.fillStyle = '#ffcf8a';
+    for (const m of motes) {
+      ctx.globalAlpha = Math.max(0, 0.2 + 0.2 * Math.sin(now / 500 + m.ph));
+      ctx.beginPath();
+      ctx.arc(m.x, m.y, m.r, 0, TAU);
+      ctx.fill();
+    }
+    ctx.globalAlpha = 1;
+    // kiln stacks on the horizon, with smoke puffs drifting up and away (still when reduced motion is on)
+    const base = H - 26;
+    for (const c of CHIMNEYS) {
+      ctx.fillStyle = '#150a12';
+      ctx.fillRect(c.x - 8, base - c.h, 16, c.h);
+      ctx.fillRect(c.x - 11, base - c.h - 4, 22, 5);
+      if (!REDUCED_MOTION) {
+        ctx.fillStyle = '#3a2a3a';
+        for (let i = 0; i < 3; i++) {
+          const p = (now / 2200 + c.x * 0.013 + i / 3) % 1;   // 0 at the stack top, 1 once the puff has spread out
+          ctx.globalAlpha = 0.22 * (1 - p);
+          ctx.beginPath();
+          ctx.arc(c.x + p * 14, base - c.h - 8 - p * 90, 5 + p * 12, 0, TAU);
+          ctx.fill();
+        }
+        ctx.globalAlpha = 1;
+      }
+    }
+
+    // the kiln floor: a faint glowing bed along the bottom edge, brighter as the heat climbs
+    const bed = ctx.createLinearGradient(0, H - 26, 0, H);
+    bed.addColorStop(0, 'rgba(255,120,50,0)');
+    bed.addColorStop(1, 'rgba(255,120,50,' + (0.10 + 0.12 * hot).toFixed(3) + ')');
+    ctx.fillStyle = bed;
+    ctx.fillRect(0, H - 26, W, 26);
+  }
+
+  function drawWorld(w) {
+    ctx.save();
+    if (w.shake > 0) {
+      const k = (w.shake / 0.35) * 6;
+      ctx.translate(rand(-k, k), rand(-k, k));
+    }
+
+    for (const s of w.sparks) {
+      if (s.kind !== 'ash') {
+        const n = s.trail.length;
+        for (let k = 0; k < n; k++) {
+          ctx.globalAlpha = 0.3 * (k + 1) / n;
+          ctx.fillStyle = '#ffb347';
+          ctx.beginPath();
+          ctx.arc(s.trail[k][0], s.trail[k][1], s.r * (0.35 + 0.5 * (k + 1) / n), 0, TAU);
+          ctx.fill();
+        }
+        ctx.globalAlpha = 1;
+        ctx.save();
+        ctx.shadowColor = 'rgba(255,170,50,0.9)';
+        ctx.shadowBlur = s.kind === 'big' ? 24 : 14;
+        ctx.fillStyle = s.kind === 'big' ? '#fff0a8' : '#ffd166';
+        ctx.beginPath();
+        ctx.arc(s.x, s.y, s.r, 0, TAU);
+        ctx.fill();
+        ctx.restore();
+        if (s.kind === 'big') {   // a big ember is worth three points: a faint halo ring marks it
+          ctx.strokeStyle = 'rgba(255,240,168,' + (0.25 + 0.15 * Math.sin(w.time * 8)).toFixed(3) + ')';
+          ctx.lineWidth = 1.5;
+          ctx.beginPath();
+          ctx.arc(s.x, s.y, s.r + 6, 0, TAU);
+          ctx.stroke();
+        }
+        // a flicker of white highlight on the ember's core, out of phase from ember to ember
+        const tw = 0.5 + 0.5 * Math.sin(w.time * 9 + s.wob);
+        if (tw > 0.6) {
+          ctx.fillStyle = 'rgba(255,255,240,' + ((tw - 0.6) * 2.25).toFixed(3) + ')';
+          ctx.beginPath();
+          ctx.arc(s.x - s.r * 0.35, s.y - s.r * 0.35, s.r * 0.22, 0, TAU);
+          ctx.fill();
+        }
+      } else {
+        // ash cinder: a lumpy chunk that tumbles as it falls
+        ctx.save();
+        ctx.translate(s.x, s.y);
+        ctx.rotate(w.time * s.spin);
+        ctx.fillStyle = '#6e6880';
+        ctx.beginPath();
+        for (let k = 0; k < 7; k++) {
+          const a = (k / 7) * TAU;
+          const rr = s.r * (0.8 + 0.22 * Math.sin(k * 2.7 + s.wob));
+          if (k === 0) ctx.moveTo(Math.cos(a) * rr, Math.sin(a) * rr);
+          else ctx.lineTo(Math.cos(a) * rr, Math.sin(a) * rr);
+        }
+        ctx.closePath();
+        ctx.fill();
+        ctx.fillStyle = '#4a4459';
+        ctx.beginPath();
+        ctx.arc(s.r * 0.25, -s.r * 0.25, s.r * 0.3, 0, TAU);
+        ctx.fill();
+        // warning: an ash cinder in the cup's lane gets a red ring as it nears the bucket line
+        const warn = clamp(1 - (w.by - s.y) / 150, 0, 1) * (Math.abs(s.x - w.bx) < w.bw / 2 + 24 ? 1 : 0);
+        if (warn > 0) {
+          // the closer the ash gets to the cup, the faster its warning ring pulses
+          const pulse = 0.6 + 0.4 * Math.sin(w.time * (6 + 14 * warn));
+          ctx.strokeStyle = 'rgba(255,90,70,' + (0.75 * warn * pulse).toFixed(3) + ')';
+          ctx.lineWidth = 2;
+          ctx.beginPath();
+          ctx.arc(0, 0, s.r + 3, 0, TAU);
+          ctx.stroke();
+        }
+        ctx.restore();
+      }
+    }
+
+    for (const p of w.parts) {
+      ctx.globalAlpha = Math.max(0, p.life / p.max);
+      ctx.fillStyle = p.color;
+      ctx.beginPath();
+      ctx.arc(p.x, p.y, 2.2, 0, TAU);
+      ctx.fill();
+    }
+    ctx.globalAlpha = 1;
+
+    // floating popups
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.font = 'bold 15px system-ui, sans-serif';
+    for (const p of w.pops) {
+      ctx.globalAlpha = Math.max(0, p.life / p.max);
+      ctx.fillStyle = p.color;
+      ctx.fillText(p.str, p.x, p.y);
+    }
+    ctx.globalAlpha = 1;
+
+    // quench shockwave rings
+    for (const rg of w.rings) {
+      const t = 1 - rg.life / rg.max;          // 0 at the start, 1 as it fades out
+      ctx.globalAlpha = 1 - t;
+      ctx.strokeStyle = rg.col || '#fff1c9';
+      ctx.lineWidth = 3 * (1 - t) + 1;
+      ctx.beginPath();
+      ctx.arc(w.bx, w.by, 20 + t * (rg.reach || 260), 0, TAU);
+      ctx.stroke();
+    }
+    ctx.globalAlpha = 1;
+
+    // warm aura over the bucket that grows with the streak
+    if (w.streak >= 3) {
+      const a = Math.min(0.55, 0.12 + w.streak * 0.02);
+      const aura = ctx.createRadialGradient(w.bx, w.by, 4, w.bx, w.by, 26 + Math.min(30, w.streak * 2));
+      aura.addColorStop(0, 'rgba(255,190,110,' + a.toFixed(3) + ')');
+      aura.addColorStop(1, 'rgba(255,190,110,0)');
+      ctx.fillStyle = aura;
+      ctx.fillRect(w.bx - 80, w.by - 80, 160, 120);
+    }
+
+    // bucket: leans a few degrees into its sideways movement
+    const tilt = clamp(w.vx / BUCKET_SPEED, -1, 1) * 0.07;
+    ctx.save();
+    ctx.translate(w.bx, w.by + w.bh / 2);
+    ctx.rotate(tilt);
+    ctx.translate(-w.bx, -(w.by + w.bh / 2));
+    const sq = w.squash * 0.12;   // squash on catch: wider and shorter, anchored at the base
+    ctx.translate(w.bx, w.by + w.bh);
+    ctx.scale(1 + sq, 1 - sq);
+    ctx.translate(-w.bx, -(w.by + w.bh));
+    const L = w.bx - w.bw / 2, R = w.bx + w.bw / 2, T = w.by, B = w.by + w.bh;
+    const cup = ctx.createLinearGradient(0, T, 0, B);
+    cup.addColorStop(0, '#e58a5c');
+    cup.addColorStop(1, '#7d3320');
+    ctx.fillStyle = cup;
+    ctx.beginPath();
+    ctx.moveTo(L, T);
+    ctx.lineTo(R, T);
+    ctx.lineTo(R - 9, B);
+    ctx.lineTo(L + 9, B);
+    ctx.closePath();
+    ctx.fill();
+
+    // molten glaze inside the cup: its surface lags the bucket's motion and wobbles a little
+    const slosh = clamp(w.vx / BUCKET_SPEED, -1, 1) * 2.5;
+    const surfY = T + 7 + Math.sin(w.time * 6) * 0.4;
+    const molten = ctx.createLinearGradient(0, surfY, 0, surfY + 8);
+    molten.addColorStop(0, 'rgba(255,200,110,0.85)');
+    molten.addColorStop(1, 'rgba(255,120,50,0.25)');
+    ctx.fillStyle = molten;
+    ctx.beginPath();
+    ctx.moveTo(L + 4, surfY - slosh);
+    ctx.lineTo(R - 4, surfY + slosh);
+    ctx.lineTo(R - 7, surfY + 8);
+    ctx.lineTo(L + 7, surfY + 8);
+    ctx.closePath();
+    ctx.fill();
+
+    // the cup's base glows hotter as the heat climbs (additive, so it reads as light)
+    const hotCup = Math.min(1, w.lvl / 6);
+    const baseGlow = ctx.createRadialGradient(w.bx, B, 2, w.bx, B, 34);
+    baseGlow.addColorStop(0, 'rgba(255,140,60,' + (0.25 + 0.35 * hotCup).toFixed(3) + ')');
+    baseGlow.addColorStop(1, 'rgba(255,140,60,0)');
+    ctx.globalCompositeOperation = 'lighter';
+    ctx.fillStyle = baseGlow;
+    ctx.fillRect(w.bx - 40, B - 34, 80, 40);
+    ctx.globalCompositeOperation = 'source-over';
+
+    // glaze highlights: a thin light line along the rim and a soft streak down the left side
+    ctx.lineWidth = 1.5;
+    ctx.strokeStyle = 'rgba(255,236,210,0.55)';
+    ctx.beginPath();
+    ctx.moveTo(L + 1, T + 1.5);
+    ctx.lineTo(R - 1, T + 1.5);
+    ctx.stroke();
+    ctx.strokeStyle = 'rgba(255,236,210,0.3)';
+    ctx.beginPath();
+    ctx.moveTo(L + 14, T + 7);
+    ctx.lineTo(L + 18, B - 6);
+    ctx.stroke();
+
+    if (w.lives === 1) {   // one life left: a crack runs down the cup
+      ctx.strokeStyle = 'rgba(40,12,6,0.75)';
+      ctx.lineWidth = 1.5;
+      ctx.beginPath();
+      ctx.moveTo(w.bx + 7, T + 3);
+      ctx.lineTo(w.bx - 2, T + 12);
+      ctx.lineTo(w.bx + 4, T + 19);
+      ctx.lineTo(w.bx - 3, B - 3);
+      ctx.stroke();
+    }
+
+    ctx.save();
+    if (w.charge >= 1) { ctx.shadowColor = '#ffd166'; ctx.shadowBlur = 16; }
+    ctx.fillStyle = w.charge >= 1 ? '#fff1c9' : '#f2b98a';
+    ctx.fillRect(L - 3, T - 5, w.bw + 6, 6);
+    ctx.restore();
+    ctx.restore();   // end of the tilt
+
+    if (w.flash > 0) {
+      ctx.fillStyle = 'rgba(255,220,160,' + (0.35 * w.flash / 0.3).toFixed(3) + ')';
+      ctx.fillRect(-20, -20, W + 40, H + 40);
+    }
+    ctx.restore();
+  }
+
+  // touch has no M key: a small speaker icon (top right) toggles mute on phones
+  function drawSpeaker(x, y) {
+    ctx.fillStyle = 'rgba(255,230,200,0.7)';
+    ctx.beginPath();
+    ctx.moveTo(x - 7, y - 3);
+    ctx.lineTo(x - 3, y - 3);
+    ctx.lineTo(x + 2, y - 7);
+    ctx.lineTo(x + 2, y + 7);
+    ctx.lineTo(x - 3, y + 3);
+    ctx.lineTo(x - 7, y + 3);
+    ctx.closePath();
+    ctx.fill();
+    ctx.strokeStyle = 'rgba(255,230,200,0.7)';
+    ctx.lineWidth = 1.6;
+    ctx.beginPath();
+    if (muted) {   // a slash across the speaker when muted
+      ctx.moveTo(x + 5, y - 4); ctx.lineTo(x + 11, y + 4);
+      ctx.moveTo(x + 11, y - 4); ctx.lineTo(x + 5, y + 4);
+    } else {
+      ctx.arc(x + 2, y, 5, -0.9, 0.9);
+    }
+    ctx.stroke();
+  }
+
+  function drawHud(w) {
+    ctx.textAlign = 'left';
+    ctx.textBaseline = 'alphabetic';
+    ctx.fillStyle = '#fff3dc';
+    ctx.font = 'bold ' + Math.round(30 + w.bump * 6) + 'px system-ui, sans-serif';
+    ctx.fillText(String(w.score), 16, 38);
+    if (w.streak >= 3) {
+      const sx = 16 + ctx.measureText(String(w.score)).width + 12;
+      ctx.font = 'bold 13px system-ui, sans-serif';
+      ctx.fillStyle = '#ffd166';
+      ctx.fillText('streak ' + w.streak, sx, 36);
+    }
+
+    for (let i = 0; i < 3; i++) {
+      const x = W - 18 - i * 22, y = 28;
+      ctx.beginPath();
+      ctx.arc(x, y, 7, 0, TAU);
+      if (i < w.lives) {
+        ctx.fillStyle = '#ff8a5b';
+        ctx.fill();
+      } else {
+        const lost = i === w.lives && w.heartT > 0;   // the heart that just went out flashes red
+        ctx.strokeStyle = lost ? 'rgba(255,90,70,' + (w.heartT / 0.6).toFixed(3) + ')' : 'rgba(255,200,160,0.35)';
+        ctx.lineWidth = 2;
+        ctx.stroke();
+      }
+    }
+
+    if (IS_TOUCH && mode === 'play') {   // touch has no P key: a tappable pause icon sits top right
+      ctx.fillStyle = 'rgba(255,230,200,0.7)';
+      ctx.fillRect(W - 30, 50, 4, 14);
+      ctx.fillRect(W - 22, 50, 4, 14);
+    }
+
+    if (mode !== 'attract') {   // the demo shows its own label up top
+      ctx.textAlign = 'center';
+      ctx.font = 'bold 11px system-ui, sans-serif';
+      ctx.fillStyle = w.beat ? '#ffd166' : 'rgba(255,230,200,0.75)';   // gold once this run has passed the best
+      ctx.fillText('best ' + Math.max(best, w.score), W / 2, 28);
+      ctx.fillStyle = 'rgba(255,230,200,0.7)';
+      ctx.fillText('heat ' + (w.lvl + 1), W / 2, 43);
+      ctx.textAlign = 'left';
+    }
+
+    // wind: a small arrow under the heat label shows which way the gusts push the cinders
+    const gustArrow = clamp(w.wind / 14, -1, 1);
+    if (mode === 'play' && Math.abs(gustArrow) > 0.08) {
+      const dir = Math.sign(gustArrow), len = 14 + 34 * Math.abs(gustArrow), cx = W / 2, ay = 56;
+      ctx.strokeStyle = 'rgba(255,230,200,' + (0.2 + 0.5 * Math.abs(gustArrow)).toFixed(3) + ')';
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      ctx.moveTo(cx - dir * len / 2, ay);
+      ctx.lineTo(cx + dir * len / 2, ay);
+      ctx.moveTo(cx + dir * len / 2, ay);
+      ctx.lineTo(cx + dir * (len / 2 - 6), ay - 4);
+      ctx.moveTo(cx + dir * len / 2, ay);
+      ctx.lineTo(cx + dir * (len / 2 - 6), ay + 4);
+      ctx.stroke();
+    }
+
+    const ready = w.charge >= 1;
+    const nx = w.nudge > 0 ? Math.sin(w.nudge * 60) * 3 * (w.nudge / 0.35) : 0;   // an early quench shakes the gauge
+    ctx.save();
+    ctx.translate(nx, 0);
+    ctx.font = 'bold 11px system-ui, sans-serif';
+    ctx.fillStyle = ready ? '#fff3dc' : 'rgba(255,230,200,0.75)';
+    ctx.fillText(ready ? (IS_TOUCH ? 'QUENCH READY - TAP TOP' : 'QUENCH READY - SPACE') : 'QUENCH', 16, 60);
+    ctx.fillStyle = 'rgba(255,255,255,0.12)';
+    ctx.fillRect(16, 66, 150, 6);
+    ctx.fillStyle = ready ? '#ffd166' : '#e58a5c';
+    ctx.fillRect(16, 66, 150 * w.charge, 6);
+    ctx.fillStyle = 'rgba(255,255,255,0.35)';
+    for (const q of [0.25, 0.5, 0.75]) ctx.fillRect(16 + 150 * q, 64, 1, 10);   // quarter ticks on the gauge
+    ctx.restore();
+    if (muted && !IS_TOUCH) {   // phones show the speaker icon instead
+      ctx.textAlign = 'right';
+      ctx.fillStyle = 'rgba(255,230,200,0.75)';
+      ctx.fillText('MUTED (M)', W - 38, 60);
+      ctx.textAlign = 'left';
+    }
+    if (w.banner) {
+      ctx.save();
+      const bIn = Math.min(1, (w.banner.max - w.banner.life) / 0.25);   // eases in over a quarter second
+      ctx.globalAlpha = Math.min(1, w.banner.life / 0.6, bIn);
+      ctx.textAlign = 'center';
+      ctx.fillStyle = '#ffd166';
+      ctx.font = 'bold 22px Georgia, serif';
+      ctx.fillText(w.banner.text, W / 2, 112 + 8 * bIn);
+      ctx.restore();
+    }
+  }
+
+  function render(now) {
+    drawBackground(now, world.lvl);
+    drawWorld(world);
+    // strong gusts: faint streaks across the sky, leaning with the wind
+    const gust = Math.min(1, Math.abs(world.wind) / 24);
+    if (gust > 0.3 && !REDUCED_MOTION) {
+      ctx.strokeStyle = 'rgba(255,220,180,' + (0.16 * gust).toFixed(3) + ')';
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      for (let i = 0; i < motes.length; i += 3) {
+        const m = motes[i];
+        ctx.moveTo(m.x, m.y);
+        ctx.lineTo(m.x + world.wind * 1.2, m.y - 1);
+      }
+      ctx.stroke();
+    }
+    if (mode === 'play' && world.lives === 1) {
+      // red edge pulse: one life left
+      const pulse = REDUCED_MOTION ? 0.5 : 0.5 + 0.5 * Math.sin(now / 180);
+      const vg = ctx.createRadialGradient(W / 2, H / 2, H * 0.35, W / 2, H / 2, H * 0.75);
+      vg.addColorStop(0, 'rgba(255,40,30,0)');
+      vg.addColorStop(1, 'rgba(255,40,30,' + (0.25 + 0.2 * pulse).toFixed(3) + ')');
+      ctx.fillStyle = vg;
+      ctx.fillRect(0, 0, W, H);
+    }
+    if (mode === 'play' && world.lives <= 0) shade(Math.min(0.55, world.dying * 0.6));   // the scene dims as the last life goes
+    if (mode !== 'title') drawHud(world);
+    if (paused) {
+      shade(0.5);
+      text('PAUSED', H * 0.45, 36, '#ffe9c2', 'bold', 'Georgia, serif');
+      text(IS_TOUCH ? 'tap to resume' : 'press P or ESC to resume', H * 0.45 + 40, 14, '#e7c7a0');
+      text('score ' + world.score + '   best ' + Math.max(best, world.score) + '   streak ' + world.streak, H * 0.45 + 72, 14, '#c9a98a', 'bold');
+      text(IS_TOUCH ? 'hold a side to move   tap the top to quench' : 'A/D or arrows move   SPACE quench   M mute', H * 0.45 + 100, 13, '#b8a08a');
+    }
+
+    if (mode === 'title' || mode === 'attract') {
+      shade(0.5);
+      const blink = REDUCED_MOTION ? 1 : 0.5 + 0.5 * Math.sin(now / 260);
+      ctx.save();   // the logo breathes with a soft ember glow (steady under reduced motion)
+      ctx.shadowColor = 'rgba(255,150,60,' + (REDUCED_MOTION ? 0.4 : 0.3 + 0.2 * Math.sin(now / 700)).toFixed(3) + ')';
+      ctx.shadowBlur = 20;
+      text('KILN KEEPER', H * 0.33 + (REDUCED_MOTION ? 0 : Math.sin(now / 600) * 4), 44, '#ffe9c2', 'bold', 'Georgia, serif');
+      ctx.restore();
+      text('catch the gold embers, dodge the ash', H * 0.33 + 42, 15, '#e7c7a0');
+      text(IS_TOUCH ? 'hold a side to move     tap the top to quench' : 'A/D or ARROWS move   SPACE quench   P pause', H * 0.33 + 74, 13, '#c9a98a');
+      if (mode === 'title') {   // a small preview: an ember bobbing above a bucket
+        const bob = REDUCED_MOTION ? 0 : Math.sin(now / 420) * 4;
+        ctx.save();
+        ctx.shadowColor = 'rgba(255,170,50,0.9)';
+        ctx.shadowBlur = 14;
+        ctx.fillStyle = '#ffd166';
+        ctx.beginPath();
+        ctx.arc(W / 2, 318 + bob, 6, 0, TAU);
+        ctx.fill();
+        ctx.restore();
+        ctx.fillStyle = '#e58a5c';
+        ctx.beginPath();
+        ctx.moveTo(W / 2 - 28, 338);
+        ctx.lineTo(W / 2 + 28, 338);
+        ctx.lineTo(W / 2 + 19, 358);
+        ctx.lineTo(W / 2 - 19, 358);
+        ctx.closePath();
+        ctx.fill();
+      }
+      ctx.globalAlpha = 0.45 + 0.55 * blink;
+      text(IS_TOUCH ? 'tap to play' : 'press any key to play', H * 0.62, 17, '#fff3dc', 'bold');
+      ctx.globalAlpha = 1;
+      text('best ' + best, H * 0.70, 14, '#e7c7a0');
+      if (mode === 'attract') {
+        text('AI DEMO', 26, 12, '#ffd166', 'bold');
+        if (lastScore > 0) text('last run ' + lastScore, H * 0.76, 13, '#c9a98a');
+        if (demoScore > 0) text('AI run ' + demoScore, H * 0.76 + 20, 12, '#b8a08a');
+      }
+    } else if (mode === 'over') {
+      const fade = Math.min(1, (now - overAt) / 400);   // the screen fades in rather than cutting in
+      shade(0.6 * fade);
+      ctx.globalAlpha = fade;
+      text('KILN OUT', H * 0.36, 42, '#ff9a6b', 'bold', 'Georgia, serif');
+      // the score counts up after the fade-in, so the result lands with a little weight
+      const shown = REDUCED_MOTION ? lastScore : Math.floor(lastScore * clamp((now - overAt - 200) / 800, 0, 1));
+      text('score ' + shown, H * 0.36 + 52, 24, '#fff3dc', 'bold');
+      if (isNewBest) text('new best!', H * 0.36 + 84, 15, '#ffd166', 'bold');
+      text('best ' + best + '   |   longest streak ' + lastStreak, H * 0.36 + 110, 14, '#e7c7a0');
+      text(lastCatches + ' catches | ' + lastGrazes + ' grazes | ' + Math.round(lastTime) + ' s | heat ' + lastHeat, H * 0.36 + 136, 13, '#c9a98a');
+      if (now - overAt > OVER_LOCK_MS) {
+        ctx.globalAlpha = 0.45 + 0.55 * (REDUCED_MOTION ? 1 : 0.5 + 0.5 * Math.sin(now / 260));
+        text(IS_TOUCH ? 'tap to try again' : 'press any key to try again', H * 0.62, 16, '#fff3dc', 'bold');
+      } else {
+        // a thin bar fills while the lock lasts, so the short wait has a visible end
+        const p = clamp((now - overAt) / OVER_LOCK_MS, 0, 1);
+        ctx.fillStyle = 'rgba(255,230,200,0.15)';
+        ctx.fillRect(W / 2 - 60, H * 0.62 - 2, 120, 3);
+        ctx.fillStyle = 'rgba(255,209,102,0.8)';
+        ctx.fillRect(W / 2 - 60, H * 0.62 - 2, 120 * p, 3);
+      }
+      ctx.globalAlpha = 1;
+    }
+    if (IS_TOUCH) drawSpeaker(W - 56, 57);   // phones: the mute icon stays visible on every screen
+  }
+
+  // ---- input ----------------------------------------------------------------------
+  window.addEventListener('keydown', e => {
+    const k = KEYS[e.code];
+    if (!k) return;
+    e.preventDefault();
+    const now = performance.now();
+    held.add(e.code);
+    lastInput = now;
+    if (e.repeat) return;
+    unlockAudio();
+    if (k === 'mute') {
+      muted = !muted;
+      saveMuted(muted);
+      return;
+    }
+    if (k === 'pause') {
+      if (mode === 'play') paused = !paused;
+      else if (!(mode === 'over' && now - overAt < OVER_LOCK_MS)) startRun();   // P or ESC also starts a run
+      return;
+    }
+    if (mode === 'play') {
+      if (k === 'space' && !paused) pendingQuench = true;
+    } else if (mode === 'over' && now - overAt < OVER_LOCK_MS) {
+      // ignore: lets the game-over screen stay readable for a moment
+    } else {
+      startRun();
+    }
+  });
+
+  // touch and mouse: hold the left or right half of the screen to move, tap the top band to quench
+  // (while paused, a tap resumes)
+  const gameX = e => (e.clientX - canvas.getBoundingClientRect().left) * W / canvas.getBoundingClientRect().width;
+  const gameY = e => (e.clientY - canvas.getBoundingClientRect().top) * H / canvas.getBoundingClientRect().height;
+  const sideOf = e => (gameX(e) < W / 2 ? -1 : 1);
+  canvas.addEventListener('pointerdown', e => {
+    e.preventDefault();
+    const now = performance.now();
+    lastInput = now;
+    unlockAudio();
+    if (IS_TOUCH && gameX(e) > W - 68 && gameX(e) < W - 46 && gameY(e) > 38 && gameY(e) < 76) {   // speaker icon
+      muted = !muted;
+      saveMuted(muted);
+      return;
+    }
+    if (paused) { paused = false; return; }
+    if (mode !== 'play') {
+      if (!(mode === 'over' && now - overAt < OVER_LOCK_MS)) startRun();
+      return;
+    }
+    if (gameX(e) > W - 44 && gameY(e) < 76) { paused = true; return; }   // tappable pause icon
+    if (gameY(e) < H * 0.2) { pendingQuench = true; return; }
+    touchDirs.set(e.pointerId, sideOf(e));
+  });
+  canvas.addEventListener('pointermove', e => {
+    if (touchDirs.has(e.pointerId)) touchDirs.set(e.pointerId, sideOf(e));
+  });
+  const endTouch = e => touchDirs.delete(e.pointerId);
+  window.addEventListener('pointerup', endTouch);
+  window.addEventListener('pointercancel', endTouch);
+
+  window.addEventListener('keyup', e => {
+    if (!KEYS[e.code]) return;
+    held.delete(e.code);
+    lastInput = performance.now();
+  });
+
+  // losing focus or hiding the tab clears held keys and pauses an active run
+  window.addEventListener('blur', () => {
+    held.clear();
+    touchDirs.clear();
+    if (mode === 'play') paused = true;
+  });
+  document.addEventListener('visibilitychange', () => {
+    if (!document.hidden) return;
+    held.clear();
+    touchDirs.clear();
+    if (mode === 'play') paused = true;
+  });
+
+  // ---- main loop --------------------------------------------------------------------
+  // screen readers: the canvas describes its state through aria-label, set only when it changes
+  // a polite live region announces heat-ups and the game-over score (a canvas label alone is not announced)
+  const liveEl = document.getElementById('live');
+  let announcedHeat = -1, announcedOver = false, announcedStreak = 0, announcedReady = false;
+  function say(msg) { if (liveEl) liveEl.textContent = msg; }
+  let lastLabel = '';
+  function updateLabel() {
+    let label;
+    if (mode === 'play') {
+      label = 'Kiln Keeper. Score ' + world.score + ', lives ' + world.lives + ', heat ' + (world.lvl + 1) + (paused ? ', paused' : '') + '.';
+    } else if (mode === 'over') {
+      label = 'Kiln Keeper game over. Score ' + lastScore + '. ' + GO_TEXT + ' to try again.';
+    } else if (mode === 'attract') {
+      label = 'Kiln Keeper demo. An AI is playing. ' + GO_TEXT + ' to play.';
+    } else {
+      label = 'Kiln Keeper. Catch the gold embers and dodge the ash. ' + GO_TEXT + ' to play.';
+    }
+    if (mode === 'play') {
+      if (world.lvl !== announcedHeat) { announcedHeat = world.lvl; say('Heat ' + (world.lvl + 1)); }
+      else if (world.streak < 10) announcedStreak = 0;   // a broken streak can announce its next 10 again
+      else if (world.streak % 10 === 0 && world.streak !== announcedStreak) { announcedStreak = world.streak; say('Streak ' + world.streak + '.'); }
+      if (world.charge < 1) announcedReady = false;   // once per full gauge, so the announcement is not repeated
+      else if (!announcedReady) { announcedReady = true; say(IS_TOUCH ? 'Quench ready. Tap the top to quench.' : 'Quench ready. Press space to quench.'); }
+    } else {
+      announcedHeat = -1;
+    }
+    if (mode === 'over' && !announcedOver) { announcedOver = true; say('Game over. Score ' + lastScore + '.'); }
+    if (mode !== 'over') announcedOver = false;
+    if (label !== lastLabel) {
+      lastLabel = label;
+      canvas.setAttribute('aria-label', label);
+    }
+  }
+
+  let last = performance.now();
+  function frame(now) {
+    const dt = clamp((now - last) / 1000, 0, 1 / 30);
+    last = now;
+    for (const m of motes) {
+      m.y -= m.sp * dt;
+      m.x = (m.x + world.wind * 0.6 * dt + W) % W;   // gusts push the motes sideways
+      if (m.y < -4) { m.y = H + 4; m.x = Math.random() * W; }
+    }
+    update(dt, now);
+    updateLabel();
+    render(now);
+    requestAnimationFrame(frame);
+  }
+  requestAnimationFrame(frame);
+})();
+</script>
+</body>
+</html>

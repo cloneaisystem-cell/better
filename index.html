@@ -1,0 +1,94 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex, nofollow">
+<title>Night Shift: how I prompt Claude to make anything better</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@500;700;800&display=swap" rel="stylesheet">
+<style>
+  :root { --bg: #16110E; --panel: #2B2420; --cream: #FAEEC4; --red: #A3231A; --red-hi: #E0443A; --muted: #B8A58A; }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; background: var(--bg); color: var(--cream); font-family: "Inter", system-ui, sans-serif; }
+  main { max-width: 560px; margin: 0 auto; padding: 22px 16px 60px; }
+  h1 { font-size: 30px; line-height: 1.1; font-weight: 800; margin: 6px 0 8px; letter-spacing: -0.02em; }
+  h1 b { color: var(--red-hi); }
+  h2 { font-size: 21px; font-weight: 800; margin: 34px 0 10px; letter-spacing: -0.01em; }
+  p, li { font-size: 16px; line-height: 1.5; color: var(--cream); }
+  .sub { color: var(--muted); margin: 0 0 16px; }
+  .game { position: relative; width: 100%; aspect-ratio: 3 / 4; border-radius: 16px; overflow: hidden; background: #1c1512; border: 2px solid var(--panel); }
+  .game iframe { position: absolute; inset: 0; width: 100%; height: 100%; border: 0; }
+  .row { display: flex; gap: 10px; margin-top: 10px; flex-wrap: wrap; }
+  .btn { display: inline-block; background: var(--red); color: var(--cream); text-decoration: none; font-weight: 800; padding: 12px 16px; border-radius: 12px; border: 0; font-size: 15px; cursor: pointer; }
+  .btn.ghost { background: transparent; border: 2px solid var(--panel); color: var(--cream); }
+  .note { background: var(--panel); border-radius: 14px; padding: 14px 16px; margin-top: 14px; }
+  .note b { color: var(--red-hi); }
+  ol.rules { padding-left: 20px; }
+  ol.rules li { margin: 8px 0; }
+  ol.rules b { color: var(--cream); }
+  pre { white-space: pre-wrap; background: #0f0b09; border: 2px solid var(--panel); border-radius: 12px; padding: 14px; font: 500 14px/1.5 ui-monospace, Consolas, monospace; color: var(--cream); margin: 8px 0; }
+  details { background: var(--panel); border-radius: 12px; padding: 12px 14px; margin: 10px 0; }
+  summary { font-weight: 800; cursor: pointer; }
+  .copy { margin-top: 4px; font-size: 13px; padding: 8px 12px; }
+  img.board { width: 100%; border-radius: 12px; border: 2px solid var(--panel); }
+  footer { color: var(--muted); font-size: 13px; margin-top: 40px; line-height: 1.5; }
+</style>
+</head>
+<body>
+<main>
+  <h1>Night Shift: built with <b>5 prompts</b></h1>
+  <p class="sub">The same Claude model that changed nothing after 100 rounds of "make it better". Tap the game to play: hold left or right to move.</p>
+
+  <div class="game"><iframe src="night-shift.html" title="Night Shift, playable" allow="autoplay"></iframe></div>
+  <div class="row">
+    <a class="btn" href="night-shift.html">Play full screen</a>
+    <a class="btn ghost" href="make-it-better-x100.html">Play the "make it better" ×100 version</a>
+  </div>
+  <div class="note">Got a score? <b>Post it under the reel.</b> I read every one.</div>
+
+  <h2>How I prompt Claude to make anything better</h2>
+  <p>"Make it better" doesn't tell Claude what better means, so it guesses. In my test it added 579 lines nobody can see. These five rules are what changed everything:</p>
+  <ol class="rules">
+    <li><b>Say what "better" means.</b> The look, the feel, or the depth. Pick one.</li>
+    <li><b>One direction per prompt.</b> Style first, then feel, then depth, then the world around it.</li>
+    <li><b>Name concrete things.</b> "Squash and stretch, a 50 ms hit-stop" beats "make it juicier".</li>
+    <li><b>Say what to keep.</b> "Keep the gameplay the same" stops it from breaking what works.</li>
+    <li><b>Say what NOT to add.</b> "No gradients, no glow, no new features" kills the generic AI look.</li>
+  </ol>
+  <p>The template I use, for games, pages, thumbnails or videos:</p>
+  <pre id="tpl">Make it better. Better means: [the one outcome you want].
+Keep: [what already works].
+Change only: [one area], with [2-3 concrete details].
+Don't add: [what you don't want].</pre>
+  <button class="btn copy" data-copy="tpl">Copy the template</button>
+
+  <h2>The 5 prompts that built this game</h2>
+  <details><summary>1. Start very basic</summary><pre id="p1">Make a very basic original browser game in a single file, index.html, with no external assets or libraries: a square you move left and right with the arrow keys to catch falling dots, while avoiding falling red dots. Plain shapes and plain colors only, no art, no sound, no menus. When nobody presses a key for 2 seconds, an attract mode plays the game by itself.</pre><button class="btn copy" data-copy="p1">Copy</button></details>
+  <details><summary>2. One clear style</summary><pre id="p2">Give it one clear art direction and keep the gameplay the same. Theme: a night-shift baker catching falling flour sacks and dodging falling eggs. Style: flat paper-cutout shapes with chunky hand-drawn outlines, only three colors (cream, warm red, ink black), a hand-lettered title. The square becomes a little baker with a basket; the dots become sacks and eggs. No gradients, no glow, no generic fonts.</pre><button class="btn copy" data-copy="p2">Copy</button></details>
+  <details><summary>3. How it feels</summary><pre id="p3">Make the one mechanic feel great, with no new features: the baker accelerates and leans into turns, the basket squashes and stretches on every catch, each catch gets a 50 ms hit-stop and a small screen shake, a broken egg splats with ink-black paper pieces, and each catch plays a short pop whose pitch rises with every catch in a row (WebAudio).</pre><button class="btn copy" data-copy="p3">Copy</button></details>
+  <details><summary>4. Depth, no new buttons</summary><pre id="p4">Add depth without new controls: three falling hazards that behave differently (an egg that falls straight, a rolling pin that zigzags, a burnt bun that splits in two near the ground), difficulty that ramps every 20 seconds, and a combo meter that doubles the score from 10 catches in a row and resets on a miss. Show the combo clearly in the same paper style.</pre><button class="btn copy" data-copy="p4">Copy</button></details>
+  <details><summary>5. A finished world</summary><pre id="p5">Make it feel like a finished indie game in the same three-color paper style: a parallax bakery background at night (ovens, shelves, a window with a moon) that warms up as the combo grows, a title screen with the hand-lettered name and a one-line pitch, a game-over screen with score, best combo and time, and a simple background music loop made with WebAudio (four soft chords). Keep the attract mode working.</pre><button class="btn copy" data-copy="p5">Copy</button></details>
+
+  <h2>What 100 rounds of "make it better" did</h2>
+  <p>Top row: the same game after 20, 40, 60, 80 and 100 rounds. It grew from 481 to 1,060 lines (a pause menu, wind, a mute button) and the only change you can see is two chimneys. Bottom row: the 5 prompts above.</p>
+  <img class="board" src="board.jpg" alt="Top: a dark game that barely changes over 100 rounds of make it better. Bottom: five prompts turning a white square into a paper-cutout bakery game.">
+
+  <div class="note" style="margin-top:28px">Want reels people watch to the end? I break down my reels inside <b>AI Virality Creators</b>, my Skool community: the hook, the cuts, the sound and the prompts.
+    <div class="row"><a class="btn" href="https://www.skool.com/cloneai-the-ecosystem-4958/about">Join on Skool</a></div>
+  </div>
+
+  <footer>Both games are original and were made by Claude (the Haiku model), one HTML file each. Night Shift was made phone-friendly afterwards (touch controls). Questions? DM @clone.creatives</footer>
+</main>
+<script>
+  document.querySelectorAll("[data-copy]").forEach(function (b) {
+    b.addEventListener("click", function () {
+      var t = document.getElementById(b.dataset.copy).innerText;
+      var done = function () { var o = b.textContent; b.textContent = "Copied"; setTimeout(function () { b.textContent = o; }, 1500); };
+      if (navigator.clipboard) navigator.clipboard.writeText(t).then(done, done);
+      else { var r = document.createRange(); r.selectNode(document.getElementById(b.dataset.copy)); getSelection().removeAllRanges(); getSelection().addRange(r); document.execCommand("copy"); done(); }
+    });
+  });
+</script>
+</body>
+</html>

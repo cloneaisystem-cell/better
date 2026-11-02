@@ -1,0 +1,1193 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+<meta name="robots" content="noindex, nofollow">
+<title>Night Shift</title>
+<style>
+  html, body { margin: 0; height: 100%; background: #1c1512; overflow: hidden; }
+  body { display: flex; align-items: center; justify-content: center; }
+  canvas { display: block; touch-action: none; }
+  html, body { touch-action: none; -webkit-user-select: none; user-select: none; -webkit-touch-callout: none; -webkit-tap-highlight-color: transparent; }
+</style>
+</head>
+<body>
+<canvas id="game"></canvas>
+<script>
+(function () {
+  "use strict";
+
+  // Logical play field, scaled to fit the window
+  var W = 480, H = 640;
+  var PS = 36;            // baker size (hitbox edge)
+  var PY = H - 60;        // baker top edge
+  var PSPEED = 460;       // baker speed, px per second
+  var DOT_R = 9;          // item radius: flour sacks (catch) and the hazards (dodge)
+  var IDLE_MS = 2000;     // no key for this long -> attract mode
+  var ACCEL = 2800;       // baker speeds up, px per second squared
+  var TURN = 4800;        // baker brakes or turns round, px per second squared
+  var HIT_STOP = 0.05;    // seconds the world freezes on every catch
+  var LEAN_K = 260, LEAN_D = 16;   // lean spring: stiffness, damping
+  var SQ_K = 700, SQ_D = 14;       // basket squash spring: stiffness, damping
+  var COMBO_N = 10;       // catches in a row before every catch scores double
+  var LEVEL_SEC = 20;     // difficulty steps up every 20 seconds
+  var PIN_FROM = 1;       // level from which rolling pins join the eggs
+  var BUN_FROM = 2;       // level from which burnt buns join
+  var SPEED_0 = 180, SPEED_STEP = 60, SPEED_CAP = 430;   // fall speed per level, px per second
+  var GAP_0 = 0.75, GAP_STEP = 0.12, GAP_MIN = 0.36;     // seconds between spawns, per level
+
+  // Art direction: three colours only, flat paper cutouts, chunky ink outlines
+  var INK = "#1c1512";    // ink black: the night, outlines, lettering
+  var CREAM = "#f4e9d0";  // cream: paper cutouts, flour sacks, counter
+  var RED = "#c8402a";    // warm red: eggs, ties, cloth, tag
+  var LW = 2.6;           // outline width for small cutouts
+
+  var canvas = document.getElementById("game");
+  var ctx = canvas.getContext("2d");
+
+  function resize() {
+    var dpr = window.devicePixelRatio || 1;
+    var s = Math.min(window.innerWidth / W, window.innerHeight / H);
+    var cw = Math.max(1, Math.floor(W * s));
+    var ch = Math.max(1, Math.floor(H * s));
+    canvas.style.width = cw + "px";
+    canvas.style.height = ch + "px";
+    canvas.width = Math.floor(cw * dpr);
+    canvas.height = Math.floor(ch * dpr);
+  }
+  window.addEventListener("resize", resize);
+  resize();
+
+  // Hand-lettered stroke font, drawn as marker strokes (no system fonts).
+  // Each glyph is [advance width, strokes]; points are in cap-height units:
+  // x from 0 to the width, y from 0 (top) to 1 (baseline).
+  var GLYPHS = {
+    "A": [0.62, [[[0, 1], [0.31, 0], [0.62, 1]], [[0.13, 0.62], [0.49, 0.62]]]],
+    "B": [0.56, [[[0, 0], [0, 1], [0.4, 1], [0.53, 0.84], [0.4, 0.52], [0, 0.52]], [[0.4, 0.52], [0.58, 0.3], [0.46, 0], [0, 0]]]],
+    "C": [0.6, [[[0.58, 0.2], [0.44, 0.03], [0.3, 0], [0.14, 0.03], [0.02, 0.2], [0, 0.5], [0.02, 0.8], [0.14, 0.97], [0.3, 1], [0.44, 0.97], [0.58, 0.8]]]],
+    "D": [0.6, [[[0, 0], [0, 1], [0.3, 1], [0.48, 0.9], [0.58, 0.66], [0.6, 0.5], [0.58, 0.34], [0.48, 0.1], [0.3, 0], [0, 0]]]],
+    "E": [0.54, [[[0.54, 0], [0, 0], [0, 1], [0.54, 1]], [[0, 0.5], [0.42, 0.5]]]],
+    "F": [0.54, [[[0.54, 0], [0, 0], [0, 1]], [[0, 0.5], [0.42, 0.5]]]],
+    "G": [0.6, [[[0.58, 0.2], [0.44, 0.03], [0.3, 0], [0.14, 0.03], [0.02, 0.2], [0, 0.5], [0.02, 0.8], [0.14, 0.97], [0.3, 1], [0.44, 0.97], [0.6, 0.8], [0.6, 0.55], [0.34, 0.55]]]],
+    "H": [0.58, [[[0, 0], [0, 1]], [[0.58, 0], [0.58, 1]], [[0, 0.5], [0.58, 0.5]]]],
+    "I": [0.26, [[[0.13, 0], [0.13, 1]], [[0, 0], [0.26, 0]], [[0, 1], [0.26, 1]]]],
+    "J": [0.5, [[[0.46, 0], [0.46, 0.72], [0.36, 0.96], [0.18, 1], [0.04, 0.86]]]],
+    "K": [0.58, [[[0, 0], [0, 1]], [[0.56, 0], [0.02, 0.56]], [[0.2, 0.38], [0.58, 1]]]],
+    "L": [0.5, [[[0, 0], [0, 1], [0.48, 1]]]],
+    "M": [0.8, [[[0, 1], [0, 0], [0.4, 0.7], [0.8, 0], [0.8, 1]]]],
+    "N": [0.6, [[[0, 1], [0, 0], [0.6, 1], [0.6, 0]]]],
+    "O": [0.62, [[[0.31, 0], [0.12, 0.04], [0.02, 0.25], [0, 0.5], [0.02, 0.75], [0.12, 0.96], [0.31, 1], [0.5, 0.96], [0.6, 0.75], [0.62, 0.5], [0.6, 0.25], [0.5, 0.04], [0.31, 0]]]],
+    "P": [0.58, [[[0, 1], [0, 0], [0.42, 0], [0.56, 0.14], [0.56, 0.38], [0.42, 0.52], [0, 0.52]]]],
+    "Q": [0.62, [[[0.31, 0], [0.12, 0.04], [0.02, 0.25], [0, 0.5], [0.02, 0.75], [0.12, 0.96], [0.31, 1], [0.5, 0.96], [0.6, 0.75], [0.62, 0.5], [0.6, 0.25], [0.5, 0.04], [0.31, 0]], [[0.4, 0.72], [0.66, 1.04]]]],
+    "R": [0.6, [[[0, 1], [0, 0], [0.42, 0], [0.56, 0.14], [0.56, 0.38], [0.42, 0.52], [0, 0.52]], [[0.3, 0.52], [0.6, 1]]]],
+    "S": [0.56, [[[0.54, 0.14], [0.4, 0.02], [0.16, 0], [0.02, 0.14], [0.04, 0.34], [0.2, 0.46], [0.38, 0.54], [0.54, 0.66], [0.56, 0.86], [0.42, 1], [0.16, 1], [0, 0.86]]]],
+    "T": [0.6, [[[0, 0], [0.6, 0]], [[0.3, 0], [0.3, 1]]]],
+    "U": [0.6, [[[0, 0], [0, 0.76], [0.1, 0.94], [0.3, 1], [0.5, 0.94], [0.6, 0.76], [0.6, 0]]]],
+    "V": [0.62, [[[0, 0], [0.31, 1], [0.62, 0]]]],
+    "W": [0.86, [[[0, 0], [0.22, 1], [0.43, 0.3], [0.64, 1], [0.86, 0]]]],
+    "X": [0.6, [[[0, 0], [0.6, 1]], [[0.6, 0], [0, 1]]]],
+    "Y": [0.6, [[[0, 0], [0.3, 0.5], [0.6, 0]], [[0.3, 0.5], [0.3, 1]]]],
+    "Z": [0.58, [[[0, 0], [0.58, 0], [0, 1], [0.58, 1]]]],
+    "0": [0.56, [[[0.28, 0], [0.1, 0.06], [0.02, 0.3], [0.02, 0.7], [0.1, 0.94], [0.28, 1], [0.46, 0.94], [0.54, 0.7], [0.54, 0.3], [0.46, 0.06], [0.28, 0]]]],
+    "1": [0.4, [[[0.08, 0.22], [0.26, 0], [0.26, 1]], [[0.02, 1], [0.34, 1]]]],
+    "2": [0.56, [[[0.02, 0.24], [0.14, 0.04], [0.3, 0], [0.46, 0.04], [0.54, 0.24], [0.48, 0.46], [0, 1], [0.56, 1]]]],
+    "3": [0.56, [[[0.02, 0.14], [0.16, 0.02], [0.36, 0], [0.5, 0.12], [0.46, 0.36], [0.24, 0.48], [0.46, 0.56], [0.56, 0.8], [0.42, 0.98], [0.16, 1], [0, 0.88]]]],
+    "4": [0.58, [[[0.44, 1], [0.44, 0], [0, 0.7], [0.58, 0.7]]]],
+    "5": [0.56, [[[0.54, 0], [0.08, 0], [0.02, 0.46], [0.34, 0.42], [0.54, 0.54], [0.58, 0.78], [0.44, 0.98], [0.16, 1], [0, 0.86]]]],
+    "6": [0.56, [[[0.5, 0.06], [0.3, 0], [0.1, 0.16], [0.02, 0.52], [0.02, 0.8], [0.14, 0.98], [0.34, 0.98], [0.52, 0.84], [0.52, 0.6], [0.36, 0.46], [0.14, 0.5], [0.03, 0.66]]]],
+    "7": [0.56, [[[0, 0], [0.56, 0], [0.22, 1]]]],
+    "8": [0.56, [[[0.28, 0.5], [0.06, 0.4], [0.04, 0.12], [0.28, 0], [0.5, 0.12], [0.48, 0.4], [0.28, 0.5], [0.04, 0.6], [0, 0.86], [0.28, 1], [0.54, 0.86], [0.5, 0.6], [0.28, 0.5]]]],
+    "9": [0.56, [[[0.54, 0.5], [0.34, 0.46], [0.12, 0.34], [0.02, 0.16], [0.16, 0], [0.38, 0.04], [0.54, 0.2], [0.54, 0.5], [0.5, 0.8], [0.32, 1], [0.08, 0.94]]]],
+    "+": [0.5, [[[0.25, 0.2], [0.25, 0.8]], [[0.03, 0.5], [0.47, 0.5]]]],
+    ".": [0.2, [[[0.1, 0.9], [0.1, 0.95]]]],
+    ":": [0.2, [[[0.1, 0.3], [0.1, 0.36]], [[0.1, 0.64], [0.1, 0.7]]]],
+    "!": [0.2, [[[0.1, 0], [0.1, 0.7]], [[0.1, 0.9], [0.1, 0.95]]]],
+    "-": [0.36, [[[0.04, 0.5], [0.32, 0.5]]]]
+  };
+
+  function glyphW(ch) { var g = GLYPHS[ch]; return g ? g[0] : 0.4; }
+
+  // Deterministic wobble so each letter keeps the same hand
+  function rnd(n) { var s = Math.sin(n * 12.9898) * 43758.5453; return s - Math.floor(s); }
+
+  // Draws hand-lettered text. top = cap-height top in px, h = cap height in px.
+  function lettering(str, x, top, h, align, col) {
+    var i, total = -0.2;
+    for (i = 0; i < str.length; i++) total += glyphW(str.charAt(i)) + 0.2;
+    var cx = align === "center" ? x - total * h / 2 : (align === "right" ? x - total * h : x);
+    ctx.strokeStyle = col;
+    ctx.lineWidth = h * 0.14;
+    ctx.lineCap = "round";
+    ctx.lineJoin = "round";
+    for (i = 0; i < str.length; i++) {
+      var ch = str.charAt(i).toUpperCase();
+      var gw = glyphW(ch), g = GLYPHS[ch];
+      if (g) {
+        var seed = ch.charCodeAt(0) * 3.7 + i * 17.3;
+        var mx = gw * h / 2, my = h / 2;
+        ctx.save();
+        ctx.translate(cx + mx, top + my + (rnd(seed) - 0.5) * 0.06 * h);
+        ctx.rotate((rnd(seed + 1) - 0.5) * 0.1);
+        ctx.translate(-mx, -my);
+        for (var s = 0; s < g[1].length; s++) {
+          var pts = g[1][s];
+          ctx.beginPath();
+          for (var p = 0; p < pts.length; p++) {
+            var j = seed + s * 7.1 + p * 3.3;
+            var qx = (pts[p][0] + (rnd(j) - 0.5) * 0.07) * h;
+            var qy = (pts[p][1] + (rnd(j + 0.5) - 0.5) * 0.07) * h;
+            if (p === 0) ctx.moveTo(qx, qy); else ctx.lineTo(qx, qy);
+          }
+          ctx.stroke();
+        }
+        ctx.restore();
+      }
+      cx += (gw + 0.2) * h;
+    }
+  }
+
+  // Shape helpers: every piece is a flat cutout with an ink outline
+  function rrect(x, y, w, h, r) {
+    ctx.beginPath();
+    ctx.moveTo(x + r, y);
+    ctx.arcTo(x + w, y, x + w, y + h, r);
+    ctx.arcTo(x + w, y + h, x, y + h, r);
+    ctx.arcTo(x, y + h, x, y, r);
+    ctx.arcTo(x, y, x + w, y, r);
+    ctx.closePath();
+  }
+
+  function cut(fill, lw) {
+    ctx.fillStyle = fill;
+    ctx.fill();
+    ctx.strokeStyle = INK;
+    ctx.lineWidth = lw || LW;
+    ctx.lineJoin = "round";
+    ctx.stroke();
+  }
+
+  function card(x, y, w, h) {
+    rrect(x + 7, y + 7, w, h, 12);   // flat red layer under the paper
+    ctx.fillStyle = RED;
+    ctx.fill();
+    rrect(x, y, w, h, 12);
+    cut(CREAM, 3.2);
+  }
+
+  function tag(x, y) {
+    rrect(x, y, 78, 28, 14);
+    cut(RED, 2.4);
+    lettering("DEMO", x + 39, y + 7, 14, "center", CREAM);
+  }
+
+  // Sound: short WebAudio pops. Each catch in a row climbs one semitone (two octaves at most).
+  var AudioCtor = window.AudioContext || window.webkitAudioContext;
+  var actx = null;
+  function audioCtx() {
+    try {
+      if (!actx && AudioCtor) { actx = new AudioCtor(); audioSetup(); }
+      if (actx && actx.state === "suspended") actx.resume();
+    } catch (e) { actx = null; }
+    return actx;
+  }
+  function pop(streak) {
+    var a = audioCtx();
+    if (!a || a.state !== "running") return;
+    var f = 440 * Math.pow(2, Math.min(24, streak - 1) / 12);
+    var t = a.currentTime;
+    var o = a.createOscillator(), g = a.createGain();
+    o.type = "sine";
+    o.frequency.setValueAtTime(f * 0.7, t);
+    o.frequency.exponentialRampToValueAtTime(f, t + 0.03);
+    g.gain.setValueAtTime(0.0001, t);
+    g.gain.exponentialRampToValueAtTime(0.3, t + 0.005);
+    g.gain.exponentialRampToValueAtTime(0.0001, t + 0.12);
+    o.connect(g);
+    g.connect(sfxOut(a));
+    o.start(t);
+    o.stop(t + 0.13);
+  }
+
+  // ---- Music: four soft chords, looped by a look-ahead scheduler ----
+  // Cmaj7, Am7, Fmaj7, G6. Each note is two detuned triangles under a slow swell and release.
+  // The music runs through a lowpass that opens as the combo climbs, and dips under the game-over card.
+  var CHORD_LEN = 3.2;                    // seconds per chord
+  var MUSIC_VOL = 0.7, MUSIC_DUCK = 0.2;  // music level, and the level under the game-over card
+  var OVER_LOCK = 0.8;                    // after a game over, keys wait this long (no mash-restart)
+  var OVER_HOLD = 10;                     // then the game-over card gives way to attract mode
+  var CHORDS = [
+    [130.81, 196.00, 246.94, 329.63],     // Cmaj7: C3 G3 B3 E4
+    [110.00, 164.81, 196.00, 261.63],     // Am7: A2 E3 G3 C4
+    [87.31, 130.81, 220.00, 329.63],      // Fmaj7: F2 C3 A3 E4
+    [98.00, 146.83, 246.94, 329.63]       // G6: G2 D3 B3 E4
+  ];
+  var muted = false;
+  var mus = { master: null, lp: null, bus: null, level: MUSIC_VOL, next: 0, idx: 0, on: false };
+
+  // Built once, on the first key press (browsers only start audio after a gesture)
+  function audioSetup() {
+    var a = actx;
+    mus.master = a.createGain();            // every sound goes through here, so M can mute it all
+    mus.master.gain.value = muted ? 0 : 1;
+    mus.master.connect(a.destination);
+    mus.lp = a.createBiquadFilter();
+    mus.lp.type = "lowpass";
+    mus.lp.frequency.value = 780;
+    mus.lp.Q.value = 0.4;
+    mus.bus = a.createGain();
+    mus.bus.gain.value = 0;                 // faded in by musicTick
+    mus.lp.connect(mus.bus);
+    mus.bus.connect(mus.master);
+    setInterval(musicTick, 150);
+  }
+  function sfxOut(a) { return mus.master || a.destination; }
+  function toggleMute() {
+    muted = !muted;
+    var a = audioCtx();
+    if (a && mus.master) mus.master.gain.setTargetAtTime(muted ? 0 : 1, a.currentTime, 0.05);
+  }
+
+  // One chord, starting at time t on the audio clock
+  function playChord(notes, t) {
+    var a = actx, end = t + CHORD_LEN;
+    for (var i = 0; i < notes.length; i++) {
+      var g = a.createGain();
+      g.gain.setValueAtTime(0, t);
+      g.gain.linearRampToValueAtTime(0.022, t + 0.9);     // slow swell
+      g.gain.setValueAtTime(0.022, end);
+      g.gain.linearRampToValueAtTime(0, end + 1);         // slow release; the next chord crossfades in
+      g.connect(mus.lp);
+      for (var d = -1; d <= 1; d += 2) {
+        var o = a.createOscillator();
+        o.type = "triangle";
+        o.frequency.value = notes[i];
+        o.detune.value = d * 6;
+        o.connect(g);
+        o.start(t);
+        o.stop(end + 1.05);
+      }
+    }
+  }
+
+  // Look-ahead scheduler: queues the next chords about half a second before the audio clock reaches them
+  function musicTick() {
+    var a = actx;
+    if (!a || a.state !== "running" || !mus.lp) return;
+    var now = a.currentTime;
+    if (!mus.on) {
+      mus.on = true;
+      mus.next = now + 0.3;
+      mus.bus.gain.setTargetAtTime(mus.level, now, 0.8);   // fade the music in
+    }
+    if (mus.next < now) mus.next = now + 0.1;             // back from a pause: never burst-schedule
+    while (mus.next < now + 0.6) {
+      playChord(CHORDS[mus.idx], mus.next);
+      mus.next += CHORD_LEN;
+      mus.idx = (mus.idx + 1) % CHORDS.length;
+    }
+  }
+
+  var mode = "demo";      // "play" = human, "demo" = attract mode
+  var held = {};          // key codes currently held down
+  var lastKeyAt = performance.now();
+  var best = 0, bestCombo = 0;   // best score and best combo; kept in this browser when storage allows
+  try {
+    best = Number(localStorage.getItem("nightshift.best")) || 0;
+    bestCombo = Number(localStorage.getItem("nightshift.combo")) || 0;
+  } catch (e) { /* no storage: the bests last for this visit only */ }
+  function saveBests() {
+    try {
+      localStorage.setItem("nightshift.best", String(best));
+      localStorage.setItem("nightshift.combo", String(bestCombo));
+    } catch (e) { /* ignore: storage is blocked */ }
+  }
+  var state = null;
+  var hitStop = 0;        // seconds of hit-stop left
+  var shakeAmp = 0;       // screen shake, px
+  var fx = [];            // ink paper shards from broken eggs
+  var warm = 0, warmTarget = 0, flare = 0, ambT = 0, played = false;
+  var pops = [];          // floating "+2" texts on doubled catches
+
+  function popText(str, x, y) { pops.push({ s: str, x: x, y: y, age: 0 }); }
+
+  function newRun() {
+    state = { px: (W - PS) / 2, vx: 0, lean: 0, leanV: 0, sq: 0, sqV: 0, streak: 0,
+              items: [], score: 0, t: 0, spawnIn: 0.5, over: false, overT: 0, maxStreak: 0, newBest: false,
+              lv: 0, lvFlash: 0 };
+  }
+  newRun();
+
+  function heldCount() {
+    var n = 0;
+    for (var k in held) if (held[k]) n++;
+    return n;
+  }
+
+  window.addEventListener("keydown", function (e) {
+    var k = e.code || e.key;
+    if (k === "KeyM" || e.key === "m" || e.key === "M") { if (!e.repeat) toggleMute(); return; }   // M: sound on or off
+    if (k === "ArrowLeft" || k === "ArrowRight" || k === "Space") e.preventDefault();
+    held[k] = true;
+    audioCtx();
+    lastKeyAt = performance.now();
+    if (mode === "demo") { mode = "play"; played = true; newRun(); }
+    else if (state.over && state.overT >= OVER_LOCK && !e.repeat) newRun();   // game over: a fresh key plays again
+  });
+  window.addEventListener("keyup", function (e) {
+    delete held[e.code || e.key];
+    lastKeyAt = performance.now();
+  });
+  window.addEventListener("blur", function () { held = {}; pointers = {}; });
+
+  // Phones (play build): hold the left or right half of the screen to move, tap to play,
+  // tap the top-right corner for sound on/off. Mouse works the same way on a computer.
+  var TOUCH = ("ontouchstart" in window) || (navigator.maxTouchPoints || 0) > 0;
+  var pointers = {};
+  function logicalPos(e) {
+    var r = canvas.getBoundingClientRect();
+    return { x: (e.clientX - r.left) / r.width * W, y: (e.clientY - r.top) / r.height * H };
+  }
+  function syncTouchHeld() {
+    var l = false, r = false;
+    for (var id in pointers) { if (pointers[id] < W / 2) l = true; else r = true; }
+    if (l) held.TouchLeft = true; else delete held.TouchLeft;
+    if (r) held.TouchRight = true; else delete held.TouchRight;
+  }
+  window.addEventListener("pointerdown", function (e) {
+    if (e.cancelable) e.preventDefault();
+    audioCtx();
+    var p = logicalPos(e);
+    lastKeyAt = performance.now();
+    if (p.x > W - 80 && p.y < 64) { toggleMute(); return; }          // sound corner
+    if (mode === "demo") { mode = "play"; played = true; newRun(); }
+    else if (state.over) { if (state.overT >= OVER_LOCK) newRun(); return; }
+    pointers[e.pointerId] = p.x;
+    syncTouchHeld();
+  }, { passive: false });
+  window.addEventListener("pointermove", function (e) {
+    if (!(e.pointerId in pointers)) return;
+    pointers[e.pointerId] = logicalPos(e).x;
+    lastKeyAt = performance.now();
+    syncTouchHeld();
+  });
+  function pointerEnd(e) { delete pointers[e.pointerId]; lastKeyAt = performance.now(); syncTouchHeld(); }
+  window.addEventListener("pointerup", pointerEnd);
+  window.addEventListener("pointercancel", pointerEnd);
+  document.addEventListener("visibilitychange", function () { if (document.hidden) { held = {}; pointers = {}; } });
+
+  function levelAt(t) { return Math.floor(t / LEVEL_SEC); }
+
+  // Triangle wave in [-1, 1] over one period: the rolling pin's zigzag
+  function triWave(p) {
+    var f = p - Math.floor(p);
+    return f < 0.5 ? 4 * f - 1 : 3 - 4 * f;
+  }
+
+  // Sacks are the catch; eggs, rolling pins and burnt buns are the hazards.
+  // Hazards join the mix as the level rises: pins from PIN_FROM, buns from BUN_FROM.
+  function spawnItem(lv) {
+    var kind = "sack";
+    if (Math.random() < Math.min(0.45, 0.25 + 0.04 * lv)) {
+      var pool = ["egg"];
+      if (lv >= PIN_FROM) pool.push("pin");
+      if (lv >= BUN_FROM) pool.push("bun");
+      kind = pool[Math.floor(Math.random() * pool.length)];
+    }
+    var it = {
+      kind: kind, bad: kind !== "sack", y: -DOT_R,
+      v: 0.85 + Math.random() * 0.3,
+      k: Math.random(),                  // per-cut variation (visual only)
+      rot: Math.random() * Math.PI * 2,  // visual only
+      spin: (Math.random() - 0.5) * 2    // visual only, rad/s
+    };
+    if (kind === "pin") {
+      // zigzag: swings across its own band of x, wider and quicker with the level
+      var amp = 52 + Math.random() * 18 + 4 * Math.min(lv, 4);
+      var m = amp + 18;
+      it.zamp = amp;
+      it.ax = m + Math.random() * (W - 2 * m);
+      it.ph = Math.random();
+      it.zf = 0.9 + 0.12 * Math.min(lv, 4) + Math.random() * 0.2;   // zigzags per second
+      it.hl = 11; it.hr = 6;   // capsule hitbox: three circles along the barrel
+      it.v *= 0.9;
+      it.x = it.ax + amp * triWave(it.ph);
+    } else {
+      it.x = DOT_R + Math.random() * (W - 2 * DOT_R);
+      if (kind === "bun") it.splitY = PY - 100 - Math.random() * 30;   // splits near the ground
+    }
+    state.items.push(it);
+  }
+
+  // Sideways motion per kind; the fall itself is shared by every item
+  function stepItem(it, dt) {
+    if (it.kind === "pin") {
+      it.ph += it.zf * dt;
+      var f = it.ph - Math.floor(it.ph);
+      it.x = it.ax + it.zamp * triWave(f);
+      it.rot = f < 0.5 ? 0.3 : -0.3;   // tilts into each turn
+    } else if (it.kind === "bunHalf") {
+      it.x += it.vx * dt;
+      if (it.x < 8) { it.x = 8; it.vx = Math.abs(it.vx); }
+      else if (it.x > W - 8) { it.x = W - 8; it.vx = -Math.abs(it.vx); }
+      it.rot += it.spin * dt;
+    } else {
+      it.rot += it.spin * dt;
+    }
+  }
+
+  // A burnt bun breaks in two at its split line: the halves fly apart and keep falling
+  function splitBun(i) {
+    var b = state.items[i];
+    state.items.splice(i, 1);
+    burst(b.x, b.y, 6, 1.5);
+    for (var s = -1; s <= 1; s += 2) {
+      state.items.push({ kind: "bunHalf", bad: true, side: s, x: b.x, y: b.y, v: b.v,
+                         vx: s * (120 + Math.random() * 60), rot: 0,
+                         spin: s * (2.4 + Math.random() * 1.6), k: Math.random(), hr: DOT_R });
+    }
+  }
+
+  // Distance from a column centre to the part of the item's sweep the baker could meet
+  function sweepGap(it, cx) {
+    var lo = it.zamp ? it.ax - it.zamp : it.x;
+    var hi = it.zamp ? it.ax + it.zamp : it.x;
+    if (cx < lo) return lo - cx;
+    if (cx > hi) return cx - hi;
+    return 0;
+  }
+
+  function circleHits(cx, cy, r) {
+    var nx = Math.max(state.px, Math.min(cx, state.px + PS));
+    var ny = Math.max(PY, Math.min(cy, PY + PS));
+    var dx = cx - nx, dy = cy - ny;
+    return dx * dx + dy * dy <= r * r;
+  }
+
+  // Round items use one circle; a rolling pin uses three circles along its barrel
+  function hitsPlayer(it) {
+    var r = it.hr || DOT_R, hl = it.hl || 0;
+    if (!hl) return circleHits(it.x, it.y, r);
+    return circleHits(it.x - hl, it.y, r) || circleHits(it.x, it.y, r) || circleHits(it.x + hl, it.y, r);
+  }
+
+  function die() {
+    state.over = true;
+    state.overT = 0;
+    if (mode === "play") {
+      state.newBest = state.score > 0 && state.score > best;
+      if (state.newBest) best = state.score;
+      if (state.maxStreak > bestCombo) bestCombo = state.maxStreak;
+      saveBests();
+    }
+  }
+
+  // A catch: hit-stop, a small shake, the basket squashes, and the pop climbs with the streak
+  function catchHit(streak) {
+    hitStop = HIT_STOP;
+    shakeAmp = Math.max(shakeAmp, 2.4);
+    flare = Math.min(1, flare + 0.35);
+    state.sq = 0.34;
+    state.sqV = 0;
+    pop(streak);
+  }
+
+  // Ink-black paper shards burst out of a point and fall away
+  function burst(x, y, n, shake) {
+    shakeAmp = Math.max(shakeAmp, shake);
+    for (var q = 0; q < n; q++) {
+      var a = -Math.PI / 2 + (Math.random() - 0.5) * Math.PI * 1.7;
+      var sp = 140 + Math.random() * 300;
+      var r = 3 + Math.random() * 4.5, k = 4 + Math.floor(Math.random() * 2), pts = [];
+      for (var p = 0; p < k; p++) {
+        var pa = (p / k) * Math.PI * 2 + Math.random() * 0.8;
+        var pr = r * (0.55 + Math.random() * 0.45);
+        pts.push([Math.cos(pa) * pr, Math.sin(pa) * pr]);
+      }
+      fx.push({ x: x, y: y, vx: Math.cos(a) * sp, vy: Math.sin(a) * sp,
+                rot: Math.random() * Math.PI * 2, spin: (Math.random() - 0.5) * 16,
+                pts: pts, age: 0, life: 0.9 + Math.random() * 0.5 });
+    }
+  }
+
+  // A broken egg, pin or bun: the big burst at the hit point
+  function splat(it) { burst(it.x, it.y, 14, 6); }
+
+  function updateFx(dt) {
+    for (var q = pops.length - 1; q >= 0; q--) {
+      pops[q].age += dt;
+      if (pops[q].age > 0.6) pops.splice(q, 1);
+    }
+    for (var i = fx.length - 1; i >= 0; i--) {
+      var f = fx[i];
+      f.age += dt;
+      if (f.age >= f.life) { fx.splice(i, 1); continue; }
+      f.vy += 1100 * dt;             // gravity
+      f.vx *= Math.exp(-2.2 * dt);   // drag
+      f.x += f.vx * dt;
+      f.y += f.vy * dt;
+      f.rot += f.spin * dt;
+    }
+  }
+
+  function drawFx() {
+    for (var i = 0; i < fx.length; i++) {
+      var f = fx[i];
+      ctx.save();
+      ctx.globalAlpha = Math.min(1, (f.life - f.age) / 0.35);
+      ctx.translate(f.x, f.y);
+      ctx.rotate(f.rot);
+      ctx.beginPath();
+      ctx.moveTo(f.pts[0][0], f.pts[0][1]);
+      for (var p = 1; p < f.pts.length; p++) ctx.lineTo(f.pts[p][0], f.pts[p][1]);
+      ctx.closePath();
+      ctx.fillStyle = INK;
+      ctx.fill();
+      ctx.strokeStyle = CREAM;
+      ctx.lineWidth = 1.4;
+      ctx.lineJoin = "round";
+      ctx.stroke();
+      ctx.restore();
+    }
+  }
+
+  // Attract mode: pick the best column (clear of eggs, close to sacks)
+  function aiDiff() {
+    var pcx = state.px + PS / 2;
+    var bestX = pcx, bestS = -Infinity;
+    var items = state.items;
+    for (var cx = PS / 2; cx <= W - PS / 2; cx += 6) {
+      var s = -Math.abs(cx - pcx) * 0.05;
+      for (var i = 0; i < items.length; i++) {
+        var it = items[i];
+        if (it.bad) {
+          // a hazard's reach covers its whole zigzag sweep, plus the hitbox and a margin
+          var reach = PS / 2 + (it.hr || DOT_R) + (it.hl || 0) + 6;
+          if (it.y < PY + PS && sweepGap(it, cx) < reach) {
+            var near = Math.min(1, Math.max(0, (it.y - (PY - 360)) / 360));
+            s -= 1000 * near + 50;
+          }
+        } else if (it.y > 0 && it.y < PY + PS) {
+          s += (it.y / H) * 60 / (1 + Math.abs(it.x - cx) / 25);
+        }
+      }
+      if (s > bestS) { bestS = s; bestX = cx; }
+    }
+    return bestX - pcx;
+  }
+
+  function update(dt) {
+    if (state.over) {
+      state.overT += dt;
+      if (mode === "demo") { if (state.overT > 1.6) newRun(); }   // attract: the run restarts by itself
+      else if (state.overT > OVER_HOLD) { mode = "demo"; newRun(); }   // play: the card waits, then attract
+      return;
+    }
+    state.t += dt;
+    var lv = levelAt(state.t);
+    if (lv > state.lv) { state.lv = lv; state.lvFlash = 1.4; }
+    if (state.lvFlash > 0) state.lvFlash -= dt;
+
+    // Baker: speed up toward the wanted velocity, brake hard to stop or turn round
+    var target = 0;
+    if (mode === "play") {
+      var dir = 0;
+      if (held.ArrowLeft || held.TouchLeft) dir -= 1;
+      if (held.ArrowRight || held.TouchRight) dir += 1;
+      target = dir * PSPEED;
+    } else {
+      var diff = aiDiff();
+      target = Math.abs(diff) < 3 ? 0 : Math.max(-PSPEED, Math.min(PSPEED, diff * 5));
+    }
+    var speeding = Math.abs(target) > Math.abs(state.vx) && (state.vx === 0 || (state.vx > 0) === (target > 0));
+    var step = (speeding ? ACCEL : TURN) * dt;
+    state.vx += Math.max(-step, Math.min(step, target - state.vx));
+    state.px += state.vx * dt;
+    if (state.px < 0 || state.px > W - PS) {
+      state.px = Math.max(0, Math.min(W - PS, state.px));
+      state.vx = 0;
+    }
+
+    // Lean: a spring toward the lean the speed implies, so the body overshoots through a turn
+    state.leanV += (LEAN_K * (state.vx / PSPEED * 0.16 - state.lean) - LEAN_D * state.leanV) * dt;
+    state.lean += state.leanV * dt;
+
+    // Basket squash: springs back from each catch, overshooting into a short stretch
+    state.sqV += (-SQ_K * state.sq - SQ_D * state.sqV) * dt;
+    state.sq += state.sqV * dt;
+
+    state.spawnIn -= dt;
+    if (state.spawnIn <= 0) {
+      spawnItem(lv);
+      state.spawnIn = Math.max(GAP_MIN, GAP_0 - GAP_STEP * lv) * (0.8 + Math.random() * 0.4);
+    }
+
+    var speed = Math.min(SPEED_CAP, SPEED_0 + SPEED_STEP * lv);
+    var items = state.items;
+    for (var i = items.length - 1; i >= 0; i--) {
+      var it = items[i];
+      stepItem(it, dt);
+      it.y += speed * it.v * dt;
+      if (it.kind === "bun" && it.y >= it.splitY) { splitBun(i); continue; }
+      if (hitsPlayer(it)) {
+        if (it.bad) { splat(it); die(); return; }
+        state.streak++;
+        if (state.streak > state.maxStreak) state.maxStreak = state.streak;
+        // the 10th catch in a row and every catch after it score double
+        var pts = state.streak >= COMBO_N ? 2 : 1;
+        state.score += pts;
+        if (pts > 1) popText("+" + pts, it.x, PY - 14);
+        catchHit(state.streak);
+        items.splice(i, 1);
+      } else if (it.y - DOT_R > H) {
+        if (!it.bad) state.streak = 0;   // a sack that gets away is a miss: the combo resets
+        items.splice(i, 1);
+      }
+    }
+  }
+
+  // Flour sack: cream cutout with a red tie and a red stamp
+  function drawSack(it) {
+    var w = 10 * (1 + (it.k - 0.5) * 0.14);
+    ctx.save();
+    ctx.translate(it.x, it.y);
+    ctx.rotate(it.rot);
+    ctx.beginPath();
+    ctx.moveTo(-4.6, -11);
+    ctx.lineTo(4.6, -11);
+    ctx.quadraticCurveTo(7.2, -8, w * 0.8, -3);
+    ctx.quadraticCurveTo(w + 0.5, 2, w, 6);
+    ctx.quadraticCurveTo(w + 0.6, 11, w - 3.5, 11);
+    ctx.lineTo(3.5 - w, 11);
+    ctx.quadraticCurveTo(-w - 0.6, 11, -w, 6);
+    ctx.quadraticCurveTo(-w - 0.5, 2, -w * 0.8, -3);
+    ctx.quadraticCurveTo(-7.2, -8, -4.6, -11);
+    ctx.closePath();
+    cut(CREAM);
+    rrect(-5.2, -10, 10.4, 3.4, 1.2);
+    cut(RED, 2);
+    ctx.beginPath();
+    ctx.arc(0, 2.5, 3.4, 0, Math.PI * 2);
+    cut(RED, 2);
+    ctx.restore();
+  }
+
+  // Egg: red cutout with a cream shine
+  function drawEgg(it) {
+    var rx = 8 * (1 + (it.k - 0.5) * 0.1), ry = 10.5;
+    ctx.save();
+    ctx.translate(it.x, it.y);
+    ctx.rotate(it.rot);
+    ctx.beginPath();
+    ctx.moveTo(0, -ry);
+    ctx.bezierCurveTo(rx * 0.6, -ry, rx, -ry * 0.4, rx, ry * 0.2);
+    ctx.bezierCurveTo(rx, ry * 0.75, rx * 0.6, ry, 0, ry);
+    ctx.bezierCurveTo(-rx * 0.6, ry, -rx, ry * 0.75, -rx, ry * 0.2);
+    ctx.bezierCurveTo(-rx, -ry * 0.4, -rx * 0.6, -ry, 0, -ry);
+    ctx.closePath();
+    cut(RED);
+    ctx.beginPath();
+    ctx.ellipse(-3, -4, 1.7, 3, -0.5, 0, Math.PI * 2);
+    ctx.fillStyle = CREAM;
+    ctx.fill();
+    ctx.restore();
+  }
+
+  // Night bakery: three parallax layers behind the play field. cam is how far the baker stands
+  // from the centre; each layer slides against it by its depth (the wall hardly moves, the ovens
+  // most). warm (0..1) is the combo heat: the lamp, the glows and the room turn red as it climbs.
+  function redA(a) { return "rgba(200,64,42," + a + ")"; }
+  function creamA(a) { return "rgba(244,233,208," + a + ")"; }
+
+  function drawBakery(cam) {
+    var flick = Math.sin(ambT * 9.1) * 0.5 + Math.sin(ambT * 5.3 + 1.7) * 0.5;   // -1..1 flame flicker
+    var flame = 1 + flare * 0.5;                                                 // catches flare the ovens
+
+    ctx.fillStyle = INK;
+    ctx.fillRect(-12, -12, W + 24, H + 24);
+
+    // layer 0, the wall (depth 0.03): brick courses, a pendant lamp, the window and its moon
+    ctx.save();
+    ctx.translate(-cam * 0.03, 0);
+    ctx.beginPath();
+    for (var r = 0, y = 0; y < H - 120; r++, y += 26) {
+      ctx.moveTo(-60, y + 0.5);
+      ctx.lineTo(W + 60, y + 0.5);
+      for (var x = (r % 2 ? 28 : 0) - 56; x < W + 60; x += 56) {
+        ctx.moveTo(x, y);
+        ctx.lineTo(x, y + 26);
+      }
+    }
+    ctx.strokeStyle = creamA(0.05);
+    ctx.lineWidth = 1;
+    ctx.stroke();
+
+    var lg = ctx.createRadialGradient(240, 62, 4, 240, 62, 150);
+    lg.addColorStop(0, creamA(0.12 + 0.1 * warm));
+    lg.addColorStop(1, creamA(0));
+    ctx.fillStyle = lg;
+    ctx.fillRect(90, 0, 300, 210);
+    ctx.beginPath();
+    ctx.moveTo(240, -10);
+    ctx.lineTo(240, 38);
+    ctx.strokeStyle = creamA(0.45);
+    ctx.lineWidth = 1.6;
+    ctx.stroke();
+    ctx.beginPath();
+    ctx.moveTo(214, 62);
+    ctx.quadraticCurveTo(240, 24, 266, 62);
+    ctx.closePath();
+    cut(RED, 2);
+    ctx.beginPath();
+    ctx.arc(240, 62, 4.5, 0, Math.PI * 2);
+    ctx.fillStyle = CREAM;
+    ctx.fill();
+
+    // the window: an ink pane that warms with the combo, a halo round the moon, stars and the moon,
+    // then the cream frame and sill
+    var wx = 344, wy = 52, ww = 108, wh = 124;
+    ctx.save();
+    rrect(wx, wy, ww, wh, 6);
+    ctx.clip();
+    ctx.fillStyle = INK;
+    ctx.fillRect(wx, wy, ww, wh);
+    ctx.fillStyle = redA(0.07 + 0.2 * warm);
+    ctx.fillRect(wx, wy, ww, wh);
+    var mg = ctx.createRadialGradient(420, 112, 20, 420, 112, 72);
+    mg.addColorStop(0, redA(0.5 * warm * flame));
+    mg.addColorStop(1, redA(0));
+    ctx.fillStyle = mg;
+    ctx.fillRect(wx, wy, ww, wh);
+    ctx.fillStyle = creamA(0.6);
+    var stars = [[358, 72], [374, 150], [392, 66], [354, 124], [440, 156]];
+    for (var s = 0; s < stars.length; s++) ctx.fillRect(stars[s][0], stars[s][1], 2, 2);
+    ctx.beginPath();
+    ctx.arc(420, 112, 22, 0, Math.PI * 2);
+    ctx.fillStyle = CREAM;
+    ctx.fill();
+    ctx.beginPath();
+    ctx.arc(430, 104, 19, 0, Math.PI * 2);
+    ctx.fillStyle = INK;
+    ctx.fill();
+    ctx.restore();
+    rrect(wx, wy, ww, wh, 6);
+    ctx.strokeStyle = creamA(0.5);
+    ctx.lineWidth = 4;
+    ctx.stroke();
+    ctx.beginPath();
+    ctx.moveTo(wx - 12, wy + wh + 4);
+    ctx.lineTo(wx + ww + 12, wy + wh + 4);
+    ctx.lineWidth = 5;
+    ctx.lineCap = "round";
+    ctx.stroke();
+    ctx.restore();
+
+    // layer 1, shelves (depth 0.09): two planks of loaves, jars and bottles
+    ctx.save();
+    ctx.translate(-cam * 0.09, 0);
+    var shelves = [212, 330];
+    for (var sh = 0; sh < shelves.length; sh++) {
+      var sy = shelves[sh];
+      ctx.fillStyle = creamA(0.13);
+      ctx.fillRect(-80, sy, W + 160, 7);
+      for (var k = -2; k <= 6; k++) {
+        var ix = k * 96 + 40 + sh * 48;
+        var kind = (((k + sh) % 3) + 3) % 3;
+        if (kind === 0) {                        // a loaf: a dome on the plank
+          ctx.beginPath();
+          ctx.ellipse(ix, sy, 15, 9, 0, Math.PI, Math.PI * 2);
+          ctx.fillStyle = creamA(0.2);
+          ctx.fill();
+        } else if (kind === 1) {                 // a jar of red glass with a cream lid
+          var jh = (k & 1) ? 26 : 18;
+          rrect(ix - 7, sy - jh, 14, jh, 3);
+          ctx.fillStyle = redA(0.3 + 0.2 * warm);
+          ctx.fill();
+          rrect(ix - 8, sy - jh - 4, 16, 5, 1.5);
+          ctx.fillStyle = creamA(0.25);
+          ctx.fill();
+        } else {                                 // a bottle
+          rrect(ix - 6, sy - 30, 12, 30, 4);
+          ctx.fillStyle = creamA(0.14);
+          ctx.fill();
+          rrect(ix - 2.5, sy - 36, 5, 7, 1.5);
+          ctx.fill();
+        }
+      }
+    }
+    ctx.restore();
+
+    // layer 2, ovens (depth 0.2): the nearest layer, so the ovens move most
+    ctx.save();
+    ctx.translate(-cam * 0.2, 0);
+    for (var o = -2; o <= 4; o++) drawOven(o * 170 + 20, flick, flame);
+    ctx.restore();
+
+    // the warm-up: a red wash over the whole room as the combo climbs
+    ctx.fillStyle = redA(0.2 * warm);
+    ctx.fillRect(-12, -12, W + 24, H + 24);
+  }
+
+  // A brick oven: a chimney and a dome, with an arched mouth that glows (red, and a cream core that flickers)
+  function drawOven(ox, flick, flame) {
+    var base = H - 24, cx = ox + 60, brick = redA(0.16 + 0.14 * warm);
+    ctx.beginPath();
+    ctx.rect(ox + 92, 408, 14, 50);
+    ctx.fillStyle = INK;
+    ctx.fill();
+    ctx.fillStyle = brick;
+    ctx.fill();
+    ctx.strokeStyle = creamA(0.28);
+    ctx.lineWidth = 1.6;
+    ctx.stroke();
+    ctx.beginPath();
+    ctx.moveTo(ox, base);
+    ctx.lineTo(ox, 486);
+    ctx.bezierCurveTo(ox, 452, ox + 120, 452, ox + 120, 486);
+    ctx.lineTo(ox + 120, base);
+    ctx.closePath();
+    ctx.fillStyle = INK;
+    ctx.fill();
+    ctx.fillStyle = brick;
+    ctx.fill();
+    ctx.stroke();
+    ctx.beginPath();
+    ctx.moveTo(cx - 32, base);
+    ctx.lineTo(cx - 32, 574);
+    ctx.arc(cx, 574, 32, Math.PI, 0);
+    ctx.lineTo(cx + 32, base);
+    ctx.closePath();
+    ctx.fillStyle = INK;
+    ctx.fill();
+    ctx.fillStyle = redA(Math.min(1, (0.5 + 0.35 * warm + 0.05 * flick) * flame));
+    ctx.fill();
+    ctx.beginPath();
+    ctx.moveTo(cx - 16, base);
+    ctx.lineTo(cx - 16, 586);
+    ctx.arc(cx, 586, 16, Math.PI, 0);
+    ctx.lineTo(cx + 16, base);
+    ctx.closePath();
+    ctx.fillStyle = creamA(Math.min(1, (0.2 + 0.5 * warm + 0.08 * flick) * flame));
+    ctx.fill();
+    var og = ctx.createRadialGradient(cx, 590, 6, cx, 590, 120);   // the glow spills onto the wall
+    og.addColorStop(0, redA(Math.min(1, 0.35 * warm * flame)));
+    og.addColorStop(1, redA(0));
+    ctx.fillStyle = og;
+    ctx.fillRect(cx - 120, 470, 240, 150);
+  }
+
+  function fmtTime(t) {
+    var s = Math.floor(t);
+    return Math.floor(s / 60) + ":" + (s % 60 < 10 ? "0" : "") + (s % 60);
+  }
+
+  // Title screen (attract mode): a paper card over the bakery, the name hand-lettered, one pitch line
+  function drawTitle() {
+    var cw = 420, chh = 240, cx0 = (W - cw) / 2, cy0 = 134;
+    card(cx0, cy0, cw, chh);
+    lettering("NIGHT SHIFT", W / 2 + 3, cy0 + 27, 48, "center", RED);   // red drop shadow
+    lettering("NIGHT SHIFT", W / 2, cy0 + 24, 48, "center", INK);
+    ctx.beginPath();
+    ctx.moveTo(W / 2 - 150, cy0 + 96);
+    ctx.quadraticCurveTo(W / 2, cy0 + 102, W / 2 + 150, cy0 + 94);
+    ctx.strokeStyle = RED;
+    ctx.lineWidth = 5;
+    ctx.lineCap = "round";
+    ctx.stroke();
+    lettering("CATCH EVERY SACK. DODGE THE REST.", W / 2, cy0 + 118, 14, "center", INK);
+    lettering(TOUCH ? "HOLD LEFT OR RIGHT TO MOVE." : "ARROW KEYS MOVE. M MUTES.", W / 2, cy0 + 146, 11, "center", INK);
+    if (Math.floor(performance.now() / 500) % 2 === 0) {
+      lettering(TOUCH ? "TAP TO PLAY" : "PRESS AN ARROW KEY", W / 2, cy0 + 178, 15, "center", RED);
+    }
+    lettering("HIGH SCORE " + best + "   BEST COMBO " + bestCombo, W / 2, cy0 + 212, 11, "center", INK);
+  }
+
+  // Game over: the score, this run's best combo and its time; a key plays again
+  function drawGameOver() {
+    var gw = 340, gh = 262, gx = (W - gw) / 2, gy = 150;
+    ctx.save();
+    ctx.globalAlpha = Math.min(1, state.overT / 0.35);
+    card(gx, gy, gw, gh);
+    lettering("GAME OVER", W / 2 + 3, gy + 25, 38, "center", RED);
+    lettering("GAME OVER", W / 2, gy + 22, 38, "center", INK);
+    lettering("SCORE " + state.score, W / 2, gy + 82, 22, "center", INK);
+    lettering("BEST COMBO " + state.maxStreak, W / 2, gy + 120, 15, "center", INK);
+    lettering("TIME " + fmtTime(state.t), W / 2, gy + 146, 15, "center", INK);
+    lettering(state.newBest ? "NEW HIGH SCORE" : "HIGH SCORE " + best, W / 2, gy + 178, 14, "center", RED);
+    if (state.overT > OVER_LOCK && Math.floor(performance.now() / 500) % 2 === 0) {
+      lettering(TOUCH ? "TAP TO PLAY AGAIN" : "PRESS AN ARROW KEY", W / 2, gy + 206, 11, "center", INK);
+    }
+    lettering("POST YOUR SCORE UNDER THE REEL", W / 2, gy + 234, 12, "center", RED);   // play build: the comment loop
+    ctx.restore();
+  }
+
+  // Counter the baker stands behind; items slide behind it
+  function drawCounter() {
+    ctx.beginPath();
+    ctx.rect(0, H - 24, W, 24);
+    cut(CREAM, 3);
+    ctx.beginPath();
+    for (var x = 48; x < W; x += 48) { ctx.moveTo(x, H - 24); ctx.lineTo(x, H - 12); }
+    ctx.strokeStyle = INK;
+    ctx.lineWidth = 2;
+    ctx.stroke();
+  }
+
+  // Little baker carrying a basket on the head. The hitbox is the 36px square at (px, PY).
+  // lean tilts the whole baker from its feet; sq squashes (+) or stretches (-) the basket.
+  function drawBaker(px, lean, sq) {
+    ctx.save();
+    ctx.translate(px, PY);
+    ctx.translate(18, 36);
+    ctx.rotate(lean);
+    ctx.translate(-18, -36);
+
+    // shirt
+    ctx.beginPath();
+    ctx.moveTo(7, 36);
+    ctx.lineTo(7, 31);
+    ctx.quadraticCurveTo(7, 26.5, 12, 26.5);
+    ctx.lineTo(24, 26.5);
+    ctx.quadraticCurveTo(29, 26.5, 29, 31);
+    ctx.lineTo(29, 36);
+    ctx.closePath();
+    cut(RED);
+
+    // arms holding the basket up: ink edge, red core
+    ctx.beginPath();
+    ctx.moveTo(9, 30);
+    ctx.lineTo(6, 14);
+    ctx.moveTo(27, 30);
+    ctx.lineTo(30, 14);
+    ctx.lineCap = "round";
+    ctx.strokeStyle = INK;
+    ctx.lineWidth = 6.4;
+    ctx.stroke();
+    ctx.strokeStyle = RED;
+    ctx.lineWidth = 3.4;
+    ctx.stroke();
+
+    // apron bib
+    ctx.beginPath();
+    ctx.rect(12.5, 29.5, 11, 6.5);
+    cut(CREAM, 2.2);
+
+    // head with a red bandana
+    ctx.beginPath();
+    ctx.arc(18, 20.5, 6.5, 0, Math.PI * 2);
+    ctx.fillStyle = CREAM;
+    ctx.fill();
+    ctx.save();
+    ctx.beginPath();
+    ctx.arc(18, 20.5, 6.5, 0, Math.PI * 2);
+    ctx.clip();
+    ctx.fillStyle = RED;
+    ctx.fillRect(10, 15.6, 16, 2.8);
+    ctx.restore();
+    ctx.beginPath();
+    ctx.arc(18, 20.5, 6.5, 0, Math.PI * 2);
+    ctx.strokeStyle = INK;
+    ctx.lineWidth = LW;
+    ctx.stroke();
+
+    // face
+    ctx.fillStyle = INK;
+    ctx.beginPath();
+    ctx.arc(15.8, 20.6, 1.1, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.beginPath();
+    ctx.arc(20.2, 20.6, 1.1, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.beginPath();
+    ctx.moveTo(15.8, 23.4);
+    ctx.quadraticCurveTo(18, 25.2, 20.2, 23.4);
+    ctx.strokeStyle = INK;
+    ctx.lineWidth = 1.2;
+    ctx.lineCap = "round";
+    ctx.stroke();
+
+    // basket: body, weave line, then the rim where sacks land (y = 0). Squashed from its base.
+    ctx.save();
+    ctx.translate(18, 13.4);
+    ctx.scale(1 + sq * 0.7, 1 - sq);
+    ctx.translate(-18, -13.4);
+    ctx.beginPath();
+    ctx.moveTo(4, 5);
+    ctx.lineTo(32, 5);
+    ctx.lineTo(28, 13.4);
+    ctx.lineTo(8, 13.4);
+    ctx.closePath();
+    cut(CREAM);
+    ctx.beginPath();
+    ctx.moveTo(6.2, 9.2);
+    ctx.lineTo(29.8, 9.2);
+    ctx.strokeStyle = INK;
+    ctx.lineWidth = 1.4;
+    ctx.stroke();
+    rrect(0, 0, 36, 5.2, 1.6);
+    cut(CREAM);
+    ctx.restore();
+
+    ctx.restore();
+  }
+
+  // Rolling pin: a cream barrel with two red handles
+  function drawPin(it) {
+    ctx.save();
+    ctx.translate(it.x, it.y);
+    ctx.rotate(it.rot);
+    rrect(-11, -4.5, 22, 9, 4.5);
+    cut(CREAM, 2.2);
+    ctx.beginPath();
+    ctx.moveTo(-6, -1.4);
+    ctx.lineTo(6, -1.4);
+    ctx.strokeStyle = INK;
+    ctx.lineWidth = 1;
+    ctx.stroke();
+    for (var s = -1; s <= 1; s += 2) {
+      ctx.beginPath();
+      ctx.arc(s * 14, 0, 3.2, 0, Math.PI * 2);
+      cut(RED, 2);
+    }
+    ctx.restore();
+  }
+
+  // Burnt bun: a charred ink dome with cream edges. A split bun is one half,
+  // clipped to its own side of the cut, with a cream cut face.
+  function drawBun(it) {
+    ctx.save();
+    ctx.translate(it.x, it.y);
+    ctx.rotate(it.rot);
+    if (it.side) {
+      ctx.beginPath();
+      if (it.side < 0) ctx.rect(-30, -30, 30, 60); else ctx.rect(0, -30, 30, 60);
+      ctx.clip();
+    }
+    ctx.beginPath();
+    ctx.moveTo(-10, 4);
+    ctx.bezierCurveTo(-11, -4, -6, -10, 0, -10);
+    ctx.bezierCurveTo(6, -10, 11, -4, 10, 4);
+    ctx.quadraticCurveTo(0, 7.5, -10, 4);
+    ctx.closePath();
+    ctx.fillStyle = INK;
+    ctx.fill();
+    ctx.strokeStyle = CREAM;
+    ctx.lineWidth = 2.2;
+    ctx.lineJoin = "round";
+    ctx.stroke();
+    ctx.beginPath();   // charred cracks
+    ctx.moveTo(-6, -5); ctx.lineTo(-3, -2); ctx.lineTo(-5, 1.5);
+    ctx.moveTo(3, -6.5); ctx.lineTo(5.5, -2.5);
+    ctx.lineWidth = 1.2;
+    ctx.stroke();
+    if (it.side) {
+      ctx.beginPath();
+      ctx.moveTo(0, -10); ctx.lineTo(0, 7);
+      ctx.lineWidth = 2;
+      ctx.stroke();
+    }
+    ctx.restore();
+  }
+
+  // Combo meter: a paper card with ten pips that fill as the run builds; X2 once it is live
+  function drawCombo(x, y) {
+    var w = 180, h = 50, n = Math.min(state.streak, COMBO_N);
+    card(x, y, w, h);
+    lettering("COMBO", x + 12, y + 8, 12, "left", INK);
+    if (state.streak >= COMBO_N) {
+      rrect(x + w - 58, y + 6, 46, 20, 10);
+      cut(RED, 2.2);
+      lettering("X2", x + w - 35, y + 10, 12, "center", CREAM);
+    } else {
+      lettering(state.streak + " OF " + COMBO_N, x + w - 12, y + 8, 12, "right", INK);
+    }
+    for (var i = 0; i < COMBO_N; i++) {
+      rrect(x + 12 + i * 16, y + 30, 12, 12, 3);
+      if (i < n) cut(RED, 2);
+      else { ctx.strokeStyle = INK; ctx.lineWidth = 1.6; ctx.stroke(); }
+    }
+  }
+
+  // Floating "+2" over the basket on doubled catches
+  function drawPops() {
+    for (var i = 0; i < pops.length; i++) {
+      var p = pops[i];
+      ctx.save();
+      ctx.globalAlpha = Math.max(0, 1 - p.age / 0.6);
+      lettering(p.s, p.x, p.y - 36 - p.age * 40, 18, "center", RED);
+      ctx.restore();
+    }
+  }
+
+  function render() {
+    ctx.setTransform(canvas.width / W, 0, 0, canvas.height / H, 0, 0);
+    if (shakeAmp > 0) ctx.translate((Math.random() * 2 - 1) * shakeAmp, (Math.random() * 2 - 1) * shakeAmp);
+    drawBakery(state.px + PS / 2 - W / 2);
+
+    for (var i = 0; i < state.items.length; i++) {
+      var it = state.items[i];
+      if (it.kind === "sack") drawSack(it);
+      else if (it.kind === "pin") drawPin(it);
+      else if (it.kind === "egg") drawEgg(it);
+      else drawBun(it);   // burnt bun and its halves
+    }
+    drawFx();
+    drawCounter();
+    drawBaker(state.px, state.lean, state.sq);
+    drawPops();
+
+    lettering(String(state.score), 18, 10, 34, "left", CREAM);
+    lettering("BEST " + best + "  LEVEL " + (state.lv + 1), 20, 50, 14, "left", CREAM);
+    drawCombo(18, 76);
+
+    if (mode === "demo" && played) tag(W - 94, 14);
+    else if (TOUCH) lettering(muted ? "SOUND OFF" : "SOUND ON", W - 16, 18, 12, "right", CREAM);   // tap here (phones)
+
+    if (mode === "play" && state.lvFlash > 0 && !state.over) {
+      // level-up card, brief, so the ramp is noticed
+      ctx.save();
+      ctx.globalAlpha = Math.min(1, state.lvFlash / 0.5);
+      card(W / 2 - 110, 128, 220, 64);
+      lettering("LEVEL " + (state.lv + 1), W / 2, 146, 30, "center", INK);
+      ctx.restore();
+    }
+
+    if (mode === "demo") drawTitle();
+
+    if (mode === "play" && state.over) drawGameOver();
+  }
+
+  var last = performance.now();
+  function frame(now) {
+    var dt = Math.min(0.05, Math.max(0, (now - last) / 1000));
+    last = now;
+    ambT += dt;
+    // the room warms with the combo and cools after a game over; catches flare the ovens
+    warmTarget = state.over ? 0 : Math.min(1, state.streak / COMBO_N);
+    warm += (warmTarget - warm) * (1 - Math.exp(-dt * 3));
+    flare *= Math.exp(-dt * 5);
+    if (mus.bus) {
+      var want = mode === "play" && state.over ? MUSIC_DUCK : MUSIC_VOL;   // the music dips under the game-over card
+      if (want !== mus.level) {
+        mus.level = want;
+        if (mus.on) mus.bus.gain.setTargetAtTime(want, actx.currentTime, 0.5);
+      }
+      mus.lp.frequency.value = 780 + 900 * warm;   // the music opens up as the combo climbs
+    }
+    // play build: standing still mid-run is allowed; only 20 s with no input hands back to attract mode
+    if (mode === "play" && !state.over && heldCount() === 0 && now - lastKeyAt >= 20000) {
+      mode = "demo";
+      newRun();
+    }
+    if (hitStop > 0) hitStop -= dt; else update(dt);
+    updateFx(dt);
+    shakeAmp *= Math.exp(-dt * 14);
+    if (shakeAmp < 0.05) shakeAmp = 0;
+    render();
+    requestAnimationFrame(frame);
+  }
+  requestAnimationFrame(frame);
+})();
+</script>
+</body>
+</html>
