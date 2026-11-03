@@ -36,6 +36,23 @@
   ul.inside li { margin: 8px 0; font-size: 15px; }
   .small { color: var(--muted); font-size: 13px; margin: 8px 0 0; }
   footer { color: var(--muted); font-size: 13px; margin-top: 40px; line-height: 1.5; }
+  footer a { color: var(--cream); font-weight: 700; }
+  /* the middle section: the system video + the big community card */
+  .system { margin-top: 42px; padding-top: 30px; border-top: 2px solid var(--panel); }
+  .system h2 { font-size: 26px; line-height: 1.15; margin: 0 0 10px; }
+  .vid { display: block; width: min(100%, 360px); aspect-ratio: 9 / 16; margin: 14px auto 6px; border-radius: 16px; background: #000; border: 2px solid var(--panel); object-fit: cover; }
+  .vid-note { text-align: center; color: var(--muted); font-size: 13px; margin: 0; }
+  .join { background: var(--cream); color: #16110E; border-radius: 18px; padding: 22px 18px 18px; margin-top: 22px; box-shadow: 0 14px 40px rgba(0,0,0,.45); }
+  .join h3 { font-size: 27px; line-height: 1.1; font-weight: 800; letter-spacing: -0.02em; margin: 0 0 6px; color: #16110E; }
+  .join p { color: #2B2420; margin: 0 0 10px; font-size: 16px; }
+  .join ul { list-style: none; padding: 0; margin: 12px 0 18px; }
+  .join li { color: #16110E; font-size: 15.5px; line-height: 1.45; margin: 10px 0; padding-left: 28px; position: relative; }
+  .join li::before { content: "\2713"; position: absolute; left: 0; top: 0; color: var(--red); font-weight: 800; font-size: 18px; }
+  .join li b { color: #16110E; }
+  .bigbtn { display: block; text-align: center; background: var(--red); color: #FFFFFF; text-decoration: none; font-weight: 800; font-size: 21px; letter-spacing: -0.01em;
+    padding: 20px 16px; border-radius: 14px; box-shadow: 0 8px 0 #6E1610, 0 14px 28px rgba(163,35,26,.35); }
+  .bigbtn:active { transform: translateY(4px); box-shadow: 0 4px 0 #6E1610; }
+  .join .small { color: #5A4E44; text-align: center; margin-top: 14px; }
 </style>
 </head>
 <body>
@@ -66,6 +83,26 @@ Change only: [one area], with [2-3 concrete details].
 Don't add: [what you don't want].</pre>
   <button class="btn copy" data-copy="tpl">Copy the template</button>
 
+  <section class="system">
+    <h2>That was one game. This is every video I post.</h2>
+    <p>The rules work because they spell out what "better" means. I wrote that down once for each part of my content, and Claude Code follows it: the morning idea list, the edit, the posting schedule. Even the DM that sent you here went out by itself. Here it is running:</p>
+    <video class="vid" src="system-video.mp4" poster="system-poster.jpg" controls playsinline preload="metadata"></video>
+    <p class="vid-note">Under a minute, sound on. The presenter is my AI clone.</p>
+
+    <div class="join">
+      <h3>Skip the 100 rounds.</h3>
+      <p>Inside AI Virality Creators, my Skool community, you get the real files behind it:</p>
+      <ul>
+        <li><b>The full Night Shift experiment.</b> All 100 "make it better" versions to open yourself, the note Claude left after every round, and what each of the 5 prompts changed.</li>
+        <li><b>Breakdowns of my reels.</b> Every prompt, every edit choice and what it cost in credits.</li>
+        <li><b>Write Better Prompts,</b> the prompting module for image and video tools.</li>
+        <li><b>A reply on your own work.</b> Post what you want to improve and I'll tell you what I'd make "better" mean for it.</li>
+      </ul>
+      <a class="bigbtn" href="https://www.skool.com/cloneai-the-ecosystem-4958/about?utm_source=instagram&amp;utm_medium=guide&amp;utm_campaign=better">Join the community &rarr;</a>
+      <p class="small">120+ creators are already inside.</p>
+    </div>
+  </section>
+
   <h2>The 5 prompts that built this game</h2>
   <details><summary>1. Start very basic</summary><pre id="p1">Make a very basic original browser game in a single file, index.html, with no external assets or libraries: a square you move left and right with the arrow keys to catch falling dots, while avoiding falling red dots. Plain shapes and plain colors only, no art, no sound, no menus. When nobody presses a key for 2 seconds, an attract mode plays the game by itself.</pre><button class="btn copy" data-copy="p1">Copy</button></details>
   <details><summary>2. One clear style</summary><pre id="p2">Give it one clear art direction and keep the gameplay the same. Theme: a night-shift baker catching falling flour sacks and dodging falling eggs. Style: flat paper-cutout shapes with chunky hand-drawn outlines, only three colors (cream, warm red, ink black), a hand-lettered title. The square becomes a little baker with a basket; the dots become sacks and eggs. No gradients, no glow, no generic fonts.</pre><button class="btn copy" data-copy="p2">Copy</button></details>
@@ -77,19 +114,8 @@ Don't add: [what you don't want].</pre>
   <p>Top row: the same game after 20, 40, 60, 80 and 100 rounds. It grew from 481 to 1,060 lines (a pause menu, wind, a mute button) and the only change you can see is four chimneys. Bottom row: the 5 prompts above.</p>
   <img class="board" src="board.jpg" alt="Top: a dark game that barely changes over 100 rounds of make it better. Bottom: five prompts turning a white square into a paper-cutout bakery game.">
 
-  <h2>What should "better" mean for your video?</h2>
-  <p>The five rules fix the prompt. Rule 1 is still yours to answer: what "better" means for your reel, your thumbnail or your ad. In my test, that missing answer is what cost 100 rounds.</p>
-  <div class="note">That's the part I work on in the open inside <b>AI Virality Creators</b>, my Skool community:
-    <ul class="inside">
-      <li><b>The full Night Shift experiment.</b> All 100 "make it better" versions to open yourself, the one-line note Claude wrote after every round, and what each of the 5 prompts changed.</li>
-      <li><b>Two prompting modules</b> for image and video tools: Write Better Prompts, and Prompt Systems for AI Images &amp; Videos.</li>
-      <li><b>A second pair of eyes.</b> Post the thing you want to improve and I'll reply with what I'd make "better" mean for it.</li>
-    </ul>
-    <div class="row"><a class="btn" href="https://www.skool.com/cloneai-the-ecosystem-4958/about">Join AI Virality Creators</a></div>
-    <p class="small">120+ creators are already inside.</p>
-  </div>
-
-  <footer>Both games are original and were made by Claude (the Haiku model), one HTML file each. Night Shift was made phone-friendly afterwards (touch controls). Questions? DM @clone.creatives</footer>
+  <footer>Both games are original and were made by Claude (the Haiku model), one HTML file each. Night Shift was made phone-friendly afterwards (touch controls). Questions? DM @clone.creatives<br>
+    <a href="https://www.skool.com/cloneai-the-ecosystem-4958/about?utm_source=instagram&amp;utm_medium=guide&amp;utm_campaign=better&amp;utm_content=footer">AI Virality Creators on Skool &rarr;</a></footer>
 </main>
 <script>
   document.querySelectorAll("[data-copy]").forEach(function (b) {
